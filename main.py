@@ -1,21 +1,18 @@
-
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   ALPHABOT v13 — FICHIER UNIQUE CORRIGÉ                    ║
-║   + Fraîcheur données (max 15min)                           ║
-║   + Expiration entrée dans le signal                        ║
-║   + Mes Signaux = signaux réels du jour                     ║
-║   + Parrainage = texte prêt à copier                        ║
-║   + Groupe VIP → Rapports perf                              ║
-║   + Fix doublon TOP PARRAINS                                ║
-║   + [NEW] FVG / Fair Value Gap detection                    ║
-║   + [NEW] BOS Pur / Continuation propre                     ║
+║   ALPHABOT v15 — EDITION RENTABILISATION                   ║
+║   + Essai PRO 3 jours automatique                           ║
+║   + Backup SQLite quotidien sur Telegram                    ║
+║   + Relance automatique utilisateurs inactifs               ║
+║   + Suivi TP/SL automatique après signal                    ║
+║   + Abonnement mensuel + paliers STARTER/PRO/VIP            ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
-import json, ssl, time, sqlite3, threading, urllib.request, urllib.parse, urllib.error
+import json, ssl, time, sqlite3, threading, urllib.request, urllib.parse, urllib.error, os
 from datetime import datetime, timedelta, timezone
 from queue    import Queue, Empty
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -36,6 +33,16 @@ REF_MONTHS   = 3
 FREE_LIMIT   = 2
 PRO_LIMIT    = 10
 NB_AGENTS    = 20
+
+# ── Paliers de prix ───────────────────────────────────────────
+PLANS = {
+    "FREE":    {"limit": 2,  "price": 0,  "label": "FREE"},
+    "STARTER": {"limit": 5,  "price": 5,  "label": "STARTER"},
+    "PRO":     {"limit": 10, "price": 10, "label": "PRO"},
+    "VIP":     {"limit": 999,"price": 25, "label": "VIP"},
+}
+TRIAL_DAYS   = 3    # jours d'essai PRO offerts aux nouveaux
+INACTIF_DAYS = 3    # jours sans activité avant relance auto
 
 SCAN_SEC     = 60
 DAILY_HOUR   = 20
@@ -216,8 +223,8 @@ def tg_send(chat_id, text, kb=None):
 def tg_updates(offset):
     return tg_req("getUpdates", {
         "offset":  offset,
-        "timeout": 2,
-        "limit":   20
+        "timeout": 0,
+        "limit":   100
     }).get("result", [])
 
 def tg_send_sticker(chat_id, sticker_id):
@@ -314,7 +321,10 @@ def db_setup():
     for col_def in ['username TEXT DEFAULT ""','plan TEXT DEFAULT "FREE"',
                     "ref_by INTEGER DEFAULT 0","ref_count INTEGER DEFAULT 0",
                     'joined TEXT DEFAULT ""',"pro_expires TEXT DEFAULT NULL",
-                    "pro_source TEXT DEFAULT NULL"]:
+                    "pro_source TEXT DEFAULT NULL",
+                    'trial_used INTEGER DEFAULT 0',
+                    'last_seen TEXT DEFAULT NULL',
+                    'plan_tier TEXT DEFAULT "FREE"']:
         try: cur.execute("ALTER TABLE users ADD COLUMN " + col_def)
         except: pass
 
@@ -372,6 +382,10 @@ def db_register(uid, uname, ref_by=0, tg_send_fn=None):
             con.commit()
 
     if is_new:
+        # ── Essai PRO 3 jours automatique ─────────────────────
+        if uid != ADMIN_ID:
+            db_activate_pro(uid, "TRIAL_3J", days=TRIAL_DAYS)
+
         # ── Notification admin : nouvel utilisateur ────────────
         if tg_send_fn and uid != ADMIN_ID:
             cur.execute("SELECT COUNT(*) FROM users")
@@ -500,6 +514,71 @@ def db_check_expiry():
     except Exception as e:
         print("  [db_check_expiry] {}".format(e))
         return []
+
+def db_get_inactive_users(days=INACTIF_DAYS):
+    """Retourne les users FREE sans activité depuis X jours."""
+    try:
+        con = _conn(); cur = con.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        # Users FREE dont le dernier comptage date est vieux ou inexistant
+        cur.execute("""
+            SELECT u.user_id, u.username FROM users u
+            WHERE u.plan='FREE'
+            AND u.user_id != ?
+            AND (
+                NOT EXISTS (
+                    SELECT 1 FROM signal_counts sc
+                    WHERE sc.user_id = u.user_id
+                    AND sc.date_str >= ?
+                )
+            )
+        """, (ADMIN_ID, cutoff))
+        rows = cur.fetchall(); con.close()
+        return rows
+    except Exception as e:
+        print("  [db_get_inactive] {}".format(e))
+        return []
+
+def db_save_signal_track(sig_id, pair, entry, tp, sl, side):
+    """Enregistre un signal pour suivi TP/SL automatique."""
+    try:
+        con = _conn(); cur = con.cursor()
+        with _db_lock:
+            cur.execute("""CREATE TABLE IF NOT EXISTS signal_tracking (
+                track_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sig_id INTEGER, pair TEXT, entry REAL, tp REAL, sl REAL,
+                side TEXT, status TEXT DEFAULT 'OPEN', sent_at TEXT)""")
+            cur.execute(
+                "INSERT INTO signal_tracking (sig_id,pair,entry,tp,sl,side,sent_at) VALUES (?,?,?,?,?,?,?)",
+                (sig_id, pair, entry, tp, sl, side, datetime.now().isoformat()))
+            con.commit()
+        con.close()
+    except Exception as e:
+        print("  [db_save_track] {}".format(e))
+
+def db_get_open_signals():
+    """Retourne les signaux ouverts à surveiller."""
+    try:
+        con = _conn(); cur = con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signal_tracking'")
+        if not cur.fetchone():
+            con.close(); return []
+        cur.execute(
+            "SELECT track_id,sig_id,pair,entry,tp,sl,side FROM signal_tracking "
+            "WHERE status='OPEN' AND sent_at >= datetime('now','-24 hours')")
+        rows = cur.fetchall(); con.close()
+        return rows
+    except:
+        return []
+
+def db_close_signal_track(track_id, status):
+    try:
+        con = _conn(); cur = con.cursor()
+        with _db_lock:
+            cur.execute("UPDATE signal_tracking SET status=? WHERE track_id=?", (status, track_id))
+            con.commit()
+        con.close()
+    except: pass
 
 def db_save_payment(uid, tx_hash):
     con = _conn(); cur = con.cursor()
@@ -634,6 +713,63 @@ def db_global_stats():
     con.close()
     return total, pro, sigs, pays, round(g1d, 2)
 
+def db_update_last_seen(uid):
+    """Met à jour la date de dernière activité de l'utilisateur."""
+    con = _conn(); cur = con.cursor()
+    with _db_lock:
+        cur.execute("UPDATE users SET last_seen=? WHERE user_id=?",
+                    (datetime.now().isoformat(), uid))
+        con.commit()
+    con.close()
+
+def db_get_inactive_users(days=3):
+    """Retourne les utilisateurs FREE inactifs depuis X jours."""
+    con = _conn(); cur = con.cursor()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    cur.execute(
+        "SELECT user_id, username FROM users WHERE plan='FREE' "
+        "AND (last_seen < ? OR last_seen IS NULL) "
+        "AND joined < ?",
+        (cutoff, cutoff))
+    rows = cur.fetchall(); con.close()
+    return rows
+
+def db_save_signal_tracking(sig_id, pair, entry, tp, sl, side):
+    """Enregistre un signal pour suivi TP/SL automatique."""
+    con = _conn(); cur = con.cursor()
+    with _db_lock:
+        cur.execute("""CREATE TABLE IF NOT EXISTS signal_tracking (
+            track_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sig_id INTEGER, pair TEXT, entry REAL, tp REAL, sl REAL,
+            side TEXT, status TEXT DEFAULT 'OPEN',
+            created TEXT, closed_at TEXT)""")
+        cur.execute(
+            "INSERT INTO signal_tracking (sig_id,pair,entry,tp,sl,side,created) VALUES (?,?,?,?,?,?,?)",
+            (sig_id, pair, entry, tp, sl, side, datetime.now().isoformat()))
+        con.commit()
+    con.close()
+
+def db_get_open_signals():
+    """Retourne les signaux ouverts à surveiller."""
+    con = _conn(); cur = con.cursor()
+    try:
+        cur.execute("""CREATE TABLE IF NOT EXISTS signal_tracking (
+            track_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sig_id INTEGER, pair TEXT, entry REAL, tp REAL, sl REAL,
+            side TEXT, status TEXT DEFAULT 'OPEN',
+            created TEXT, closed_at TEXT)""")
+        cur.execute("SELECT track_id,pair,entry,tp,sl,side,created FROM signal_tracking WHERE status='OPEN'")
+        rows = cur.fetchall(); con.close(); return rows
+    except: con.close(); return []
+
+def db_close_signal_tracking(track_id, status):
+    con = _conn(); cur = con.cursor()
+    with _db_lock:
+        cur.execute("UPDATE signal_tracking SET status=?,closed_at=? WHERE track_id=?",
+                    (status, datetime.now().isoformat(), track_id))
+        con.commit()
+    con.close()
+
 
 # ═══════════════════════════════════════════════════════════════
 #  ⑥ CLAVIERS TELEGRAM
@@ -678,19 +814,22 @@ def kb_pro():
 def send_welcome(uid, uname, ref_by=0):
     db_register(uid, uname, ref_by, tg_send_fn=tg_send)
     tg_send_sticker(uid, STK_WELCOME)
-    is_pro = db_is_pro(uid)
+    is_pro   = db_is_pro(uid)
     name_txt = "@" + uname if uname else "Trader"
     sn, sm, sl, wknd = get_session()
     wknd_note = "\n\U0001f30d <b>Week-end : crypto uniquement !</b>" if wknd else ""
+    plan_line = (
+        "\U0001f381 <b>ESSAI PRO {} JOURS OFFERT !</b> \u2705 Tu as accès à tout !".format(TRIAL_DAYS)
+        if is_pro else
+        "\U0001f513 FREE \u2192 /pay"
+    )
     tg_send(uid,
-        "\U0001f916 <b>AlphaBot PRO v8.5 \u2014 Bienvenue {} !</b>\n".format(name_txt) +
+        "\U0001f916 <b>AlphaBot PRO v14 \u2014 Bienvenue {} !</b>\n".format(name_txt) +
         "\u2550" * 22 + "\n\n"
         "\U0001f194 <b>ID :</b> <code>{}</code>\n"
         "\U0001f4cc <b>Plan :</b> {}\n"
         "\U0001f553 <b>Session :</b> {}  \u00b7  Score min : <b>{}</b>{}\n\n".format(
-            uid,
-            "\U0001f4a0 PRO actif \u2705" if is_pro else "\U0001f513 FREE \u2192 /pay",
-            sl, sm, wknd_note) +
+            uid, plan_line, sl, sm, wknd_note) +
         "\u2550" * 22 + "\n"
         "\U0001f916 <b>20 agents IA</b> scannent en parallèle :\n"
         "  \U0001f947 Or · Argent · Platine  \u00b7  \u20bf BTC\n"
@@ -699,10 +838,10 @@ def send_welcome(uid, uname, ref_by=0):
         "  \U0001f4c8 Indices US : NAS100 \u00b7 SPX500 \u00b7 US30\n"
         "  \U0001f6e2 Pétrole : USOIL\n\n" +
         "\u2550" * 22 + "\n"
-        "\U0001f513 FREE = {} sig/j  \u2014  \U0001f4a0 PRO = max {}/j\n"
-        "\U0001f91d {} filleuls = {} mois PRO <b>GRATUIT</b>\n\n"
+        "\U0001f381 Essai PRO {} jours GRATUIT pour tout nouveau membre !\n"
+        "\U0001f4a0 PRO = max {}/j  \u00b7  \U0001f91d {} filleuls = {} mois PRO\n\n"
         "\U0001f4d6 Tape /guide ou choisis ci-dessous \u2193".format(
-            FREE_LIMIT, PRO_LIMIT, REF_TARGET, REF_MONTHS),
+            TRIAL_DAYS, PRO_LIMIT, REF_TARGET, REF_MONTHS),
         kb=kb_reply())
 
 def send_account(uid, uname, forced_plan=None):
@@ -798,33 +937,50 @@ def send_pro(uid):
         plan, exp, src = db_get_pro_info(uid)
         exp_txt = "À VIE" if not exp else "expire le {}".format(exp)
         tg_send(uid,
-            "\U0001f4a0 <b>PRO actif !</b> \u2705\n\n"
+            "\U0001f4a0 <b>Plan {} actif !</b> \u2705\n\n"
             "Accès : <b>{}</b>\nSignaux : max {}/j\n\nMerci \U0001f64f".format(
-                exp_txt, PRO_LIMIT),
+                plan, exp_txt, PRO_LIMIT),
             kb=kb_back())
         return
     refs = db_get_refs(uid)
     tg_send_sticker(uid, STK_PRO)
     tg_send(uid,
-        "\U0001f4a0 <b>ALPHABOT PRO v8.5</b>\n" + "\u2550" * 22 + "\n\n"
-        "\u2705 Max {} signaux/j (meilleurs seulement)\n"
-        "\u2705 24 paires + crypto week-end\n"
-        "\u2705 Lot 0.01, 0.10 et 1.00 dans chaque signal\n"
-        "\u2705 20 agents IA en parallèle\n"
-        "\u2705 Rapport scan + quotidien + hebdo\n"
-        "\u2705 Support @leaderOdg\n\n" +
-        "\u2501" * 20 + "\n"
-        "\U0001f4b0 <b>Option 1 : {}$ USDT TRC20</b> \u2192 Accès immédiat\n\n"
-        "\U0001f91d <b>Option 2 : Parrainage GRATUIT</b>\n"
+        "\U0001f4a0 <b>PASSE AU NIVEAU SUPÉRIEUR</b>\n" + "\u2550" * 22 + "\n\n"
+        "\U0001f513 <b>FREE</b>  \u2014  2 signaux/jour  \u2014  Gratuit\n\n"
+        "\U0001f680 <b>STARTER</b>  \u2014  5 signaux/jour\n"
+        "  \u2022 Analyse ICT/SMC complète\n"
+        "  \u2022 Entrée + TP + SL + RR\n"
+        "  \u2022 <b>5$ USDT/mois</b>\n\n"
+        "\U0001f4a0 <b>PRO</b>  \u2014  10 signaux/jour\n"
+        "  \u2022 Tout STARTER +\n"
+        "  \u2022 Rapports quotidiens + hebdo\n"
+        "  \u2022 Suivi TP/SL automatique\n"
+        "  \u2022 <b>10$ USDT/mois</b>\n\n"
+        "\U0001f451 <b>VIP</b>  \u2014  Signaux illimités\n"
+        "  \u2022 Tout PRO +\n"
+        "  \u2022 Accès prioritaire aux meilleurs setups\n"
+        "  \u2022 Support direct @leaderOdg\n"
+        "  \u2022 <b>25$ USDT/mois</b>\n\n" +
+        "\u2501" * 22 + "\n"
+        "\U0001f91d <b>Parrainage GRATUIT</b>\n"
         "{} filleuls = {} mois PRO (renouvelable)\n"
-        "Tes filleuls : {}/{}\n\n/pay \u00b7 /ref".format(
-            PRO_LIMIT, PRO_PROMO, REF_TARGET, REF_MONTHS, refs, REF_TARGET),
-        kb=kb_pro())
+        "Tes filleuls : {}/{}\n\n"
+        "\U0001f449 /pay pour payer et choisir ton plan".format(
+            REF_TARGET, REF_MONTHS, refs, REF_TARGET),
+        kb={"inline_keyboard": [
+            [{"text": "🚀 STARTER — 5$/mois",  "callback_data": "pay_plan_STARTER"}],
+            [{"text": "💠 PRO — 10$/mois",      "callback_data": "pay_plan_PRO"}],
+            [{"text": "👑 VIP — 25$/mois",      "callback_data": "pay_plan_VIP"}],
+            [{"text": "🤝 Parrainage gratuit",   "callback_data": "ref"}],
+        ]})
 
-def send_pay(uid):
-    """Instructions de paiement USDT TRC20 + bouton J'ai payé."""
+def send_pay(uid, plan_key="PRO"):
+    """Instructions de paiement USDT TRC20 avec plan choisi."""
+    plan   = PLANS.get(plan_key, PLANS["PRO"])
+    price  = plan["price"]
+    label  = plan["label"]
     msg = (
-        "\U0001f4b0 <b>PAIEMENT PRO \u2014 {}$ USDT</b>\n".format(PRO_PROMO) +
+        "\U0001f4b0 <b>PAIEMENT {} \u2014 {}$ USDT/mois</b>\n".format(label, price) +
         "\u2501" * 22 + "\n\n"
         "\u26a0\ufe0f <b>RÉSEAU : TRC20 UNIQUEMENT</b>\n"
         "Pas BEP20, pas ERC20 \u2014 sinon perdu !\n\n"
@@ -834,12 +990,12 @@ def send_pay(uid):
         "1\ufe0f\u20e3 Ouvre Binance / Trust Wallet...\n"
         "2\ufe0f\u20e3 Envoie <b>{}$ USDT TRC20</b> à l'adresse\n"
         "3\ufe0f\u20e3 Clique <b>J'ai payé ✅</b> ci-dessous\n"
-        "4\ufe0f\u20e3 Envoie ton <b>TX Hash</b> ou une <b>capture d'écran</b>\n\n"
-        "\U0001f916 <b>Activation automatique sous 2 min !</b>".format(PRO_PROMO)
+        "4\ufe0f\u20e3 Envoie ton <b>TX Hash</b>\n\n"
+        "\U0001f916 <b>Activation automatique sous 2 min !</b>".format(price)
     )
     kb = {"inline_keyboard": [
-        [{"text": "✅ J'ai payé — Soumettre ma preuve", "callback_data": "pay_submitted"}],
-        [{"text": "◀️ Menu", "callback_data": "main"}],
+        [{"text": "✅ J'ai payé — Soumettre le TX Hash", "callback_data": "pay_submitted_{}".format(plan_key)}],
+        [{"text": "◀️ Voir les plans", "callback_data": "pro"}],
     ]}
     tg_send(uid, msg, kb=kb)
 
@@ -1777,34 +1933,51 @@ def _fmt_daily_report(stats):
     wr   = int(w / sc * 100)
     perf = "\U0001f525\U0001f525" if stats["total_g1"] > 2000 else \
            "\U0001f525" if stats["total_g1"] > 1000 else "\U0001f4b0"
+
     lines = [
         "\U0001f4af <b>RAPPORT DU JOUR \u2014 AlphaBot PRO</b> {}".format(perf),
         "\u2550" * 22,
         "\U0001f4c5 {}  \u00b7  Session fermée".format(date_fr), "",
-        "\U0001f3af <b>RÉSULTATS</b>",
-        "  \u2705 TP atteints : <b>{}</b>  |  \u274c SL touchés : <b>{}</b>  |  {}% réussite".format(w, l, wr),
+        "\U0001f3af <b>BILAN GLOBAL</b>",
+        "  \u2705 TP atteints : <b>{}</b>  |  \u274c SL touchés : <b>{}</b>  |  <b>{}%</b> réussite".format(w, l, wr),
         "  \U0001f4b5 Lot 0.01 : <b>+${}</b>  \u00b7  Lot 1.00 : <b>+${}</b>".format(
             stats["total_g001"], stats["total_g1"]),
         "", "\u2501" * 22,
-        "\U0001f4cb <b>DÉTAIL DES TRADES</b>", ""]
+        "\U0001f4cb <b>DÉTAIL DES TRADES</b>", ""
+    ]
+
     for row in stats["rows"]:
-        pair, side, rr, g001, g1, l001, l1, session = row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
-        entry = row[8] if len(row) > 8 else "—"
-        tp    = row[9] if len(row) > 9 else "—"
-        sl    = row[10] if len(row) > 10 else "—"
-        ok    = rr >= 3.0
-        icon  = "\u2705 TP" if ok else "\u274c SL"
-        d     = "\u2b06\ufe0f" if side == "BUY" else "\u2b07\ufe0f"
-        result = "+${:.0f}".format(g1) if ok else "-${:.0f}".format(l1)
-        lines.append("{} <b>{}</b>  {} {}  RR 1:{}  \u2192 <b>{}</b>".format(
-            icon, pair, d, side, rr, result))
-        lines.append("   \U0001f4cd Entrée <code>{}</code>  \u2192  TP <code>{}</code>  SL <code>{}</code>".format(
-            entry, tp, sl))
+        pair    = row[0]; side = row[1]; rr   = row[2]
+        g001    = row[3]; g1   = row[4]; l001 = row[5]; l1 = row[6]
+        entry   = row[8]  if len(row) > 8  else "—"
+        tp      = row[9]  if len(row) > 9  else "—"
+        sl      = row[10] if len(row) > 10 else "—"
+        ok      = rr >= 3.0
+        d       = "\u2b06\ufe0f" if side == "BUY" else "\u2b07\ufe0f"
+        sf      = "ACHAT" if side == "BUY" else "VENTE"
+        outcome = "\u2705 TP ATTEINT" if ok else "\u274c SL TOUCHÉ"
+        gain_lot001 = "+${:.2f}".format(g001) if ok else "-${:.2f}".format(l001)
+        gain_lot1   = "+${:.0f}".format(g1)   if ok else "-${:.0f}".format(l1)
+
+        lines.append("{} <b>{}</b>  {} {}  \u2014  RR <b>1:{}</b>".format(
+            "\U0001f7e2" if ok else "\U0001f534", pair, d, sf, rr))
+        lines.append("  {} {}".format(outcome, gain_lot1 + " (lot 1.00)"))
+        lines.append("  \U0001f4cd Entrée : <code>{}</code>".format(entry))
+        lines.append("  \u2705 TP     : <code>{}</code>".format(tp))
+        lines.append("  \u274c SL     : <code>{}</code>".format(sl))
+        lines.append("  \U0001f4b5 Lot 0.01 : <b>{}</b>  \u00b7  Lot 1.00 : <b>{}</b>".format(
+            gain_lot001, gain_lot1))
         lines.append("")
-    lines += ["\u2550" * 22,
-              "\U0001f4e9 Rejoins AlphaBot PRO \u2014 {}$ USDT".format(PRO_PROMO),
-              "\U0001f449 @AlphaBotForexBot",
-              "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max"]
+
+    lines += [
+        "\u2550" * 22,
+        "\U0001f4b0 Total lot 0.01 : <b>+${}</b>  \u00b7  Lot 1.00 : <b>+${}</b>".format(
+            stats["total_g001"], stats["total_g1"]),
+        "",
+        "\U0001f4e9 Rejoins AlphaBot PRO \u2014 {}$ USDT".format(PRO_PROMO),
+        "\U0001f449 @AlphaBotForexBot",
+        "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max"
+    ]
     return "\n".join(lines)
 
 def _fmt_weekly_report(stats):
@@ -1964,13 +2137,143 @@ def _scan_and_send_inner():
 
     expired = db_check_expiry()
     for uid, uname in expired:
-        tg_send(uid,
-            "\u23f0 <b>PRO expiré</b>\n\n"
-            "Renouveler :\n/pay \u2192 {}$ USDT\n"
-            "/ref \u2192 {} filleuls = {} mois gratuit".format(PRO_PROMO, REF_TARGET, REF_MONTHS))
+        # Ne pas downgrader si c'était un essai → message spécifique
+        plan, exp, src = db_get_pro_info(uid)
+        if src and "TRIAL" in (src or ""):
+            tg_send(uid,
+                "\u23f0 <b>Ton essai PRO de {} jours est terminé !</b>\n\n"
+                "Tu as pu voir la puissance des signaux AlphaBot.\n\n"
+                "\U0001f4a0 Continue avec le <b>Plan PRO à {}$ USDT</b>\n"
+                "et garde accès à tous les signaux !\n\n"
+                "\U0001f449 /pay \u2014 Activation immédiate".format(TRIAL_DAYS, PRO_PROMO))
+        else:
+            tg_send(uid,
+                "\u23f0 <b>PRO expiré</b>\n\n"
+                "Renouveler :\n/pay \u2192 {}$ USDT\n"
+                "/ref \u2192 {} filleuls = {} mois gratuit".format(PRO_PROMO, REF_TARGET, REF_MONTHS))
         tg_send(ADMIN_ID, "\u23f0 PRO expiré: @{} <code>{}</code>".format(uname or "?", uid))
     if expired:
         log("WARN", clr("{} PRO expiré(s) → FREE".format(len(expired)), "yellow"))
+
+    # ── Backup quotidien à DAILY_HOUR ─────────────────────────
+    if int(hour_str) == DAILY_HOUR and date_str != getattr(_scan_and_send_inner, "_last_backup", ""):
+        _scan_and_send_inner._last_backup = date_str
+        threading.Thread(target=_do_backup, daemon=True).start()
+
+    # ── Relance utilisateurs inactifs (toutes les 6h) ─────────
+    if int(hour_str) % 6 == 0 and date_str + hour_str != getattr(_scan_and_send_inner, "_last_relance", ""):
+        _scan_and_send_inner._last_relance = date_str + hour_str
+        threading.Thread(target=_relance_inactifs, daemon=True).start()
+
+    # ── Suivi TP/SL des signaux ouverts ───────────────────────
+    threading.Thread(target=_check_open_signals, daemon=True).start()
+
+
+def _do_backup():
+    """Envoie une copie de la DB à l'admin sur Telegram."""
+    try:
+        import shutil
+        backup_path = "/tmp/alphabot_backup_{}.db".format(
+            datetime.now().strftime("%Y%m%d_%H%M"))
+        shutil.copy2(DB_FILE, backup_path)
+        with open(backup_path, "rb") as f:
+            data = f.read()
+        tg_send_document(ADMIN_ID, data,
+            "alphabot_backup_{}.db".format(datetime.now().strftime("%Y%m%d")),
+            "\U0001f4be <b>Backup quotidien</b> \u2014 {}\n"
+            "Conserve ce fichier en lieu sûr.".format(
+                datetime.now().strftime("%d/%m/%Y %H:%M")))
+        log("INFO", clr("Backup DB envoyé à l'admin.", "green"))
+    except Exception as e:
+        log("WARN", clr("Backup échoué: {}".format(e), "yellow"))
+
+def _relance_inactifs():
+    """Envoie un message de relance aux utilisateurs FREE inactifs."""
+    try:
+        inactifs = db_get_inactive_users(days=INACTIF_DAYS)
+        if not inactifs: return
+        stats = db_daily_stats()
+        for uid, uname in inactifs[:20]:  # max 20 par cycle
+            try:
+                fname = "@" + uname if uname else "Trader"
+                tg_send(uid,
+                    "\U0001f44b <b>Hey {} !</b>\n\n".format(fname) +
+                    "\U0001f4ca AlphaBot a envoyé <b>{} signaux</b> aujourd'hui\n"
+                    "avec <b>+${}</b> de gains estimés (lot 1.00)\n\n".format(
+                        stats["sig_count"], stats["total_g1"]) +
+                    "\u2705 {} TP atteints  \u00b7  {}% réussite\n\n".format(
+                        stats["wins"],
+                        int(stats["wins"]/stats["sig_count"]*100) if stats["sig_count"] else 0) +
+                    "Tu rates ces opportunités !\n\n"
+                    "\U0001f916 Reviens voir tes signaux :\n"
+                    "\U0001f449 @AlphaBotForexBot",
+                    kb=kb_reply())
+                time.sleep(0.1)
+            except: pass
+        log("INFO", clr("Relance envoyée à {} inactifs.".format(len(inactifs[:20])), "dim"))
+    except Exception as e:
+        log("WARN", clr("Relance échouée: {}".format(e), "yellow"))
+
+def _check_open_signals():
+    """Vérifie si les signaux ouverts ont atteint TP ou SL."""
+    try:
+        open_sigs = db_get_open_signals()
+        if not open_sigs: return
+        for track_id, pair, entry, tp, sl, side, created in open_sigs:
+            # Vérifier si le signal a moins de 4h (sinon on abandonne)
+            try:
+                age = (datetime.now() - datetime.fromisoformat(created)).total_seconds() / 3600
+                if age > 4:
+                    db_close_signal_tracking(track_id, "EXPIRED")
+                    continue
+            except: continue
+            # Récupérer le prix actuel
+            mkt = next((m for m in MARKETS if m["name"] == pair), None)
+            if not mkt: continue
+            try:
+                c = fetch_c(mkt["sym"], "5m", "1d")
+                if not c: continue
+                current = c[-1]["c"]
+                if side == "BUY":
+                    if current >= tp:
+                        db_close_signal_tracking(track_id, "TP")
+                        _notify_result(pair, side, entry, tp, sl, "TP", current)
+                    elif current <= sl:
+                        db_close_signal_tracking(track_id, "SL")
+                        _notify_result(pair, side, entry, tp, sl, "SL", current)
+                else:
+                    if current <= tp:
+                        db_close_signal_tracking(track_id, "TP")
+                        _notify_result(pair, side, entry, tp, sl, "TP", current)
+                    elif current >= sl:
+                        db_close_signal_tracking(track_id, "SL")
+                        _notify_result(pair, side, entry, tp, sl, "SL", current)
+            except: continue
+    except Exception as e:
+        log("WARN", clr("Suivi signal échoué: {}".format(e), "yellow"))
+
+def _notify_result(pair, side, entry, tp, sl, result, current):
+    """Notifie tous les utilisateurs du résultat d'un signal."""
+    icon   = "\u2705" if result == "TP" else "\u274c"
+    label  = "TP ATTEINT \U0001f4b0" if result == "TP" else "SL TOUCHÉ \u26a0\ufe0f"
+    d      = "\u2b06\ufe0f" if side == "BUY" else "\u2b07\ufe0f"
+    sf     = "ACHAT" if side == "BUY" else "VENTE"
+    msg    = (
+        "{} <b>RÉSULTAT \u2014 {}</b>  {}\n".format(icon, pair, d) +
+        "\u2501" * 20 + "\n\n"
+        "<b>{}</b>\n\n"
+        "\U0001f4cd Entrée : <code>{}</code>\n"
+        "\U0001f3af Prix actuel : <code>{}</code>\n"
+        "\u2705 TP : <code>{}</code>  \u274c SL : <code>{}</code>\n\n"
+        "\U0001f916 AlphaBot PRO \u00b7 @AlphaBotForexBot"
+    ).format(label, entry, current, tp, sl)
+    # Envoyer au canal et à tous les users
+    tg_send(CHANNEL_ID, msg)
+    for puid in db_get_pro_users():
+        tg_send(puid, msg); time.sleep(0.04)
+    for fuid in db_get_free_users():
+        tg_send(fuid, msg); time.sleep(0.04)
+    log("SIGNAL", clr("Résultat {} : {} {} → {}".format(pair, sf, entry, result), "green"))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2730,6 +3033,8 @@ def handle_broadcast_message(uid, text):
 #  ⑫ DISPATCHER — Tous les boutons et commandes
 # ═══════════════════════════════════════════════════════════════
 def dispatch_message(uid, uname, txt):
+    # Mise à jour activité utilisateur
+    threading.Thread(target=db_update_last_seen, args=(uid,), daemon=True).start()
     # /start
     if txt.startswith("/start"):
         args   = txt.split()[1:]
@@ -2870,12 +3175,29 @@ def dispatch_message(uid, uname, txt):
         tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
 
 
+_processed_callbacks = set()
+_cb_lock = threading.Lock()
+
 def dispatch_callback(cb):
     """Route les boutons inline — tous les callback_data gérés."""
     uid   = cb["from"]["id"]
     uname = cb["from"].get("username", "")
     data  = cb.get("data", "")
-    tg_req("answerCallbackQuery", {"callback_query_id": cb["id"]})
+    cb_id = cb["id"]
+
+    # ── Anti-doublon : ignore si déjà traité ─────────────────
+    with _cb_lock:
+        if cb_id in _processed_callbacks:
+            return
+        _processed_callbacks.add(cb_id)
+        # Nettoyer le set si trop grand (garde les 500 derniers)
+        if len(_processed_callbacks) > 500:
+            oldest = list(_processed_callbacks)[:250]
+            for k in oldest:
+                _processed_callbacks.discard(k)
+
+    # Répondre immédiatement (SYNCHRONE) pour éviter retry Telegram
+    tg_req("answerCallbackQuery", {"callback_query_id": cb_id})
     db_register(uid, uname)
 
     if   data == "main":
@@ -2890,6 +3212,12 @@ def dispatch_callback(cb):
     # ── Flux paiement interactif ──────────────────────────────
     elif data == "pay_submitted":
         handle_pay_submitted(uid, uname)
+    elif data.startswith("pay_submitted_"):
+        plan_key = data.replace("pay_submitted_", "")
+        handle_pay_submitted(uid, uname, plan_key=plan_key)
+    elif data.startswith("pay_plan_"):
+        plan_key = data.replace("pay_plan_", "")
+        send_pay(uid, plan_key=plan_key)
     elif data == "pay_confirm":
         threading.Thread(target=handle_pay_confirm, args=(uid, uname), daemon=True).start()
     elif data == "pay_cancel":
@@ -3033,7 +3361,22 @@ def startup():
 # ═══════════════════════════════════════════════════════════════
 #  ⑭ BOUCLE PRINCIPALE
 # ═══════════════════════════════════════════════════════════════
+def _start_health_server():
+    """Mini serveur HTTP pour satisfaire Render (port binding requis)."""
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"AlphaBot OK")
+        def log_message(self, *a): pass
+    port = int(os.environ.get("PORT", 10000))
+    srv  = HTTPServer(("0.0.0.0", port), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log("INFO", clr("Health server port {}".format(port), "bold", "green"))
+
+
 def main():
+    _start_health_server()
     skip_offset = startup()
     if skip_offset is None:
         return
@@ -3043,7 +3386,8 @@ def main():
 
     while True:
         try:
-            for upd in tg_updates(offset):
+            upd_list = tg_updates(offset)
+            for upd in upd_list:
                 offset = upd["update_id"] + 1
 
                 if "message" in upd:
@@ -3053,25 +3397,28 @@ def main():
                     txt   = msg.get("text", "").strip()
 
                     if txt:
-                        # TX Hash collé pendant le flux paiement
-                        if uid in _payment_state and _payment_state[uid].get("step") == "waiting_proof":
-                            cleaned = txt.strip()
-                            if len(cleaned) >= 20 and not cleaned.startswith("/"):
-                                handle_payment_proof_received(uid, uname, tx=cleaned)
+                        def _handle_msg(uid=uid, uname=uname, txt=txt):
+                            if uid in _payment_state and _payment_state[uid].get("step") == "waiting_proof":
+                                cleaned = txt.strip()
+                                if len(cleaned) >= 20 and not cleaned.startswith("/"):
+                                    handle_payment_proof_received(uid, uname, tx=cleaned)
+                                else:
+                                    dispatch_message(uid, uname, txt)
                             else:
                                 dispatch_message(uid, uname, txt)
-                        else:
-                            dispatch_message(uid, uname, txt)
+                        threading.Thread(target=_handle_msg, daemon=True).start()
 
                 elif "callback_query" in upd:
-                    dispatch_callback(upd["callback_query"])
+                    cb = upd["callback_query"]
+                    threading.Thread(target=dispatch_callback, args=(cb,), daemon=True).start()
 
             now = time.time()
             if now - last_scan >= SCAN_SEC:
                 last_scan = now
                 threading.Thread(target=scan_and_send, daemon=True).start()
 
-            time.sleep(0.2)
+            # Sleep adaptatif : 0.05s si messages reçus, 0.1s si rien
+            time.sleep(0.05 if upd_list else 0.1)
 
         except KeyboardInterrupt:
             print()
