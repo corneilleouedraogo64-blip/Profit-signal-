@@ -3442,6 +3442,21 @@ def main():
 
         threading.Thread(target=_scan_loop, daemon=True).start()
 
+        # ── Self-ping toutes les 14 minutes ───────────────────
+        # Empêche Render de mettre le service en veille (free tier)
+        def _self_ping():
+            ping_url = render_url.rstrip("/")
+            while True:
+                try:
+                    time.sleep(14 * 60)  # toutes les 14 minutes
+                    http_get(ping_url, timeout=10)
+                    log("INFO", clr("Self-ping OK — service actif", "dim"))
+                except Exception as ex:
+                    log("WARN", clr("Self-ping échoué: {}".format(ex), "yellow"))
+
+        threading.Thread(target=_self_ping, daemon=True).start()
+        log("INFO", clr("Self-ping activé (toutes les 14 min)", "bold", "green"))
+
         try:
             server.serve_forever()
         except KeyboardInterrupt:
