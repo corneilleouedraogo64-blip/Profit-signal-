@@ -20,7 +20,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 #  ① CONFIG
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN    = "6950706659:AAGXw-27ebhWLm2HfG7lzC7EckpwCPS_JFg"
-BOT_USERNAME = "AlphaBotForexBot"
+BOT_USERNAME = "leaderodg_bot"
 CHANNEL_ID   = "-1003757467015"
 ADMIN_ID     = 6982051442
 
@@ -1075,7 +1075,7 @@ def send_rapports(uid):
     lines += [
         "", "\u2550" * 22,
         "\u26a0\ufe0f Estimations si TP atteint. Pas un conseil financier.",
-        "\U0001f916 AlphaBot PRO  \u00b7  @AlphaBotForexBot"
+        "\U0001f916 AlphaBot PRO  \u00b7  @leaderodg_bot"
     ]
     tg_send(uid, "\n".join(lines), kb=kb_back())
 
@@ -1236,7 +1236,7 @@ def _make_pdf_placeholder():
          ("  /activate /degrade /testfree /testpro", False),
          ("  /scan /debug /resetcount /monstatus", False),
          ("  /stats /membres /marches", False),
-         ("", False), ("AlphaBot PRO v8.5 — @AlphaBotForexBot", True),
+         ("", False), ("AlphaBot PRO v8.5 — @leaderodg_bot", True),
          ("Not financial advice — Risk 1-2% max par trade", False)],
     ]
     def build_page(lines_text):
@@ -1878,7 +1878,7 @@ def fmt_signal_pro(s, news, sl):
         "\U0001f4cb Filtres : {news_s}  \u00b7  {sp_s}\n\n" +
         "\u2550" * 22 + "\n"
         "\u26a0\ufe0f Risk 1% max  \u00b7  Not financial advice\n"
-        "\U0001f916 AlphaBot PRO  \u00b7  @AlphaBotForexBot"
+        "\U0001f916 AlphaBot PRO  \u00b7  @leaderodg_bot"
     ).format(
         se=se, d=d, sf=sf, name=s["name"], emo=emo, cname=cname, sl=sl,
         time=s["time"], valid=valid_str,
@@ -1976,7 +1976,7 @@ def _fmt_daily_report(stats):
             stats["total_g001"], stats["total_g1"]),
         "",
         "\U0001f4e9 Rejoins AlphaBot PRO \u2014 {}$ USDT".format(PRO_PROMO),
-        "\U0001f449 @AlphaBotForexBot",
+        "\U0001f449 @leaderodg_bot",
         "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max"
     ]
     return "\n".join(lines)
@@ -1998,7 +1998,7 @@ def _fmt_weekly_report(stats):
             stats["week_start"], stats["total_g001"], stats["total_g1"], sc, w, wr) +
         "\u2550" * 22 + "\n"
         "\U0001f4e9 Rejoins AlphaBot PRO\n"
-        "\U0001f449 @AlphaBotForexBot \u2014 {}$ USDT\n\n"
+        "\U0001f449 @leaderodg_bot \u2014 {}$ USDT\n\n"
         "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max".format(PRO_PROMO)
     )
 
@@ -2207,7 +2207,7 @@ def _relance_inactifs():
                         int(stats["wins"]/stats["sig_count"]*100) if stats["sig_count"] else 0) +
                     "Tu rates ces opportunités !\n\n"
                     "\U0001f916 Reviens voir tes signaux :\n"
-                    "\U0001f449 @AlphaBotForexBot",
+                    "\U0001f449 @leaderodg_bot",
                     kb=kb_reply())
                 time.sleep(0.1)
             except: pass
@@ -2266,7 +2266,7 @@ def _notify_result(pair, side, entry, tp, sl, result, current):
         "\U0001f4cd Entrée : <code>{}</code>\n"
         "\U0001f3af Prix actuel : <code>{}</code>\n"
         "\u2705 TP : <code>{}</code>  \u274c SL : <code>{}</code>\n\n"
-        "\U0001f916 AlphaBot PRO \u00b7 @AlphaBotForexBot"
+        "\U0001f916 AlphaBot PRO \u00b7 @leaderodg_bot"
     ).format(label, entry, current, tp, sl)
     # Envoyer au canal et à tous les users
     tg_send(CHANNEL_ID, msg)
@@ -2868,12 +2868,12 @@ PROMO_MESSAGES = [
             "Tu rates des trades parce que tu ne sais pas quand entrer ? ↗️\n\n"
             "Entrée précise, Stop Loss et Take Profit automatiques 🎯\n"
             "Une IA qui analyse le marché à ta place, 24h/24 🤖\n\n"
-            "📩 Rejoins AlphaBot maintenant\n➡️ @AlphaBotForexBot\n\n"
+            "📩 Rejoins AlphaBot maintenant\n➡️ @leaderodg_bot\n\n"
             "🌍 <b>DES RÉSULTATS QUI CHANGENT TOUT</b> ✈️\n\n"
             "Karim a suivi les signaux avec discipline pendant 3 semaines 📊\n"
             "Résultat : <b>+340$ sur un capital de 500$</b> avec des lots 0.10 💰\n\n"
             "Le trading, ce n'est pas du hasard…\nc'est de la méthode et les bons outils 💫\n\n"
-            "📩 Envoie <b>START</b> ici\n➡️ @AlphaBotForexBot"
+            "📩 Envoie <b>START</b> ici\n➡️ @leaderodg_bot"
         )
     },
     {
@@ -2885,7 +2885,7 @@ PROMO_MESSAGES = [
             "Analyse ICT/SMC professionnelle à portée de main 📲\n\n"
             "✅ Signal reçu\n✅ Entrée placée\n✅ TP atteint\n\n"
             "C'est aussi simple que ça 🎯\n\n"
-            "📩 Commence <b>GRATUIT</b> aujourd'hui\n➡️ @AlphaBotForexBot"
+            "📩 Commence <b>GRATUIT</b> aujourd'hui\n➡️ @leaderodg_bot"
         )
     },
     {
@@ -2898,7 +2898,7 @@ PROMO_MESSAGES = [
             "Tu n'as qu'à exécuter 💪\n\n"
             "🆓 2 signaux gratuits par jour\n"
             "💎 Plan PRO = jusqu'à 10 signaux/jour\n\n"
-            "📩 Lance-toi maintenant\n➡️ @AlphaBotForexBot"
+            "📩 Lance-toi maintenant\n➡️ @leaderodg_bot"
         )
     },
     {
@@ -2917,7 +2917,7 @@ PROMO_MESSAGES = [
             "         + rapports quotidiens et hebdo\n\n"
             "Tout ça pour seulement <b>10$ USDT</b> 💵\n"
             "Ou <b>30 filleuls = 3 mois PRO GRATUIT</b> 🤝\n\n"
-            "📩 Commence dès maintenant\n➡️ @AlphaBotForexBot"
+            "📩 Commence dès maintenant\n➡️ @leaderodg_bot"
         )
     },
 ]
@@ -2940,7 +2940,7 @@ def _build_promo_text(promo_id):
     lines += ["",
         "💰 <b>Total : +${}</b> lot 0.01  ·  +${} lot 1.00 🔥".format(stats["total_g001"],stats["total_g1"]),
         "","Et toi tu étais où pendant ces moves ? 👀","",
-        "📩 Rejoins la communauté\n➡️ @AlphaBotForexBot"]
+        "📩 Rejoins la communauté\n➡️ @leaderodg_bot"]
     return "\n".join(lines)
 
 def send_admin_promo_list(uid):
