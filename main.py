@@ -183,7 +183,7 @@ def http_get(url, headers=None, timeout=15):
             else: raise
     raise Exception("Max retries atteint")
 
-def http_post(url, data, timeout=20):
+def http_post(url, data, timeout=15):
     raw  = urllib.parse.urlencode(data).encode("utf-8")
     hdrs = {"Content-Type": "application/x-www-form-urlencoded"}
     for attempt in range(3):
@@ -209,10 +209,6 @@ def tg_req(method, params):
         print("  [TG] {}".format(e))
         return {}
 
-# Stocke le message_id du dernier message bot par utilisateur
-_user_msg_id = {}   # uid -> message_id
-_umsg_lock   = threading.Lock()
-
 def tg_send(chat_id, text, kb=None):
     p = {
         "chat_id":                  str(chat_id),
@@ -225,46 +221,10 @@ def tg_send(chat_id, text, kb=None):
     with _tg_lock:
         return tg_req("sendMessage", p)
 
-def tg_edit(chat_id, text, kb=None):
-    """Édite le dernier message du bot pour cet utilisateur.
-    Si impossible (trop vieux, supprimé…), envoie un nouveau message."""
-    with _umsg_lock:
-        mid = _user_msg_id.get(chat_id)
-    if mid:
-        p = {
-            "chat_id":                  str(chat_id),
-            "message_id":               str(mid),
-            "text":                     text,
-            "parse_mode":               "HTML",
-            "disable_web_page_preview": "true"
-        }
-        if kb:
-            p["reply_markup"] = json.dumps(kb)
-        with _tg_lock:
-            r = tg_req("editMessageText", p)
-        if r.get("ok"):
-            return r
-    # Fallback : nouveau message
-    return tg_send_and_track(chat_id, text, kb)
-
-def tg_delete(chat_id, message_id):
-    """Supprime un message."""
-    tg_req("deleteMessage", {"chat_id": str(chat_id), "message_id": str(message_id)})
-
-def tg_send_and_track(chat_id, text, kb=None):
-    """Envoie un message ET mémorise son message_id pour édition future."""
-    r = tg_send(chat_id, text, kb)
-    if r and r.get("ok"):
-        mid = r["result"].get("message_id")
-        if mid:
-            with _umsg_lock:
-                _user_msg_id[chat_id] = mid
-    return r
-
 def tg_updates(offset):
     return tg_req("getUpdates", {
         "offset":  offset,
-        "timeout": 5,   # long polling 5s — réduit les appels et évite les doubles
+        "timeout": 0,
         "limit":   100
     }).get("result", [])
 
@@ -864,7 +824,7 @@ def send_welcome(uid, uname, ref_by=0):
         if is_pro else
         "\U0001f513 FREE \u2192 /pay"
     )
-    tg_send_and_track(uid,
+    tg_send(uid,
         "\U0001f916 <b>AlphaBot PRO v14 \u2014 Bienvenue {} !</b>\n".format(name_txt) +
         "\u2550" * 22 + "\n\n"
         "\U0001f194 <b>ID :</b> <code>{}</code>\n"
@@ -913,7 +873,7 @@ def send_account(uid, uname, forced_plan=None):
         plan_line = "\U0001f513 <b>FREE</b>  {}/{} sig aujourd'hui".format(count, lim)
 
     mode_banner = "\U0001f9ea <i>[Vue simulée — mode {}]</i>\n\n".format(forced_plan) if forced_plan else ""
-    tg_send_and_track(uid,
+    tg_send(uid,
         mode_banner +
         "\U0001f4ca <b>MON COMPTE</b>\n" + "\u2550" * 22 + "\n\n"
         "\U0001f464 @{}  <code>{}</code>\n"
@@ -969,7 +929,7 @@ def send_signals_info(uid):
             lines.append("\U0001f4a0 <b>Passe PRO pour max {}/j</b>\n/pay \u2014 {}$ USDT".format(
                 PRO_LIMIT, PRO_PROMO))
 
-    tg_send_and_track(uid, "\n".join(lines), kb=kb_back())
+    tg_send(uid, "\n".join(lines), kb=kb_back())
 
 def send_pro(uid):
     is_pro = db_is_pro(uid)
@@ -977,7 +937,7 @@ def send_pro(uid):
         tg_send_sticker(uid, STK_CROWN)
         plan, exp, src = db_get_pro_info(uid)
         exp_txt = "À VIE" if not exp else "expire le {}".format(exp)
-        tg_send_and_track(uid,
+        tg_send(uid,
             "\U0001f4a0 <b>Plan {} actif !</b> \u2705\n\n"
             "Accès : <b>{}</b>\nSignaux : max {}/j\n\nMerci \U0001f64f".format(
                 plan, exp_txt, PRO_LIMIT),
@@ -1043,7 +1003,7 @@ def send_pay(uid, plan_key="PRO"):
 def send_mes_gains(uid):
     stats = db_daily_stats(); rows = stats["rows"]
     if not rows:
-        tg_send_and_track(uid, "\U0001f4b8 <b>MES GAINS</b>\n\nAucun signal aujourd'hui.", kb=kb_back())
+        tg_send(uid, "\U0001f4b8 <b>MES GAINS</b>\n\nAucun signal aujourd'hui.", kb=kb_back())
         return
     lines = ["\U0001f4b8 <b>GAINS DU JOUR</b>", "\u2550" * 22, ""]
     for row in rows:
@@ -1117,7 +1077,7 @@ def send_rapports(uid):
         "\u26a0\ufe0f Estimations si TP atteint. Pas un conseil financier.",
         "\U0001f916 AlphaBot PRO  \u00b7  @AlphaBotForexBot"
     ]
-    tg_send_and_track(uid, "\n".join(lines), kb=kb_back())
+    tg_send(uid, "\n".join(lines), kb=kb_back())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1136,7 +1096,7 @@ def send_affilie(uid, uname):
     bar  = "\u2588" * int(done / REF_TARGET * 10) + "\u2591" * (10 - int(done / REF_TARGET * 10))
 
     # ── MESSAGE 1 : Texte promo direct prêt à partager ────────
-    tg_send_and_track(uid,
+    tg_send(uid,
         "\U0001f4cb <b>COPIE CE MESSAGE ET ENVOIE À TES AMIS :</b>\n\n"
         "\u2501" * 22 + "\n\n"
         "\U0001f916 <b>AlphaBot PRO</b> \u2014 Signaux trading GRATUITS !\n\n"
@@ -1173,7 +1133,7 @@ def send_affilie(uid, uname):
         kb=kb_back())
 
 def send_broker(uid):
-    tg_send_and_track(uid,
+    tg_send(uid,
         "\U0001f3e6 <b>BROKER \u2014 EXNESS</b>\n\n"
         "\u2705 Spread 0 pip (Raw)\n"
         "\u2705 Dépôt minimum 10$\n"
@@ -1184,7 +1144,7 @@ def send_broker(uid):
         kb=kb_back())
 
 def send_guide(uid):
-    tg_send_and_track(uid,
+    tg_send(uid,
         "\U0001f4d6 <b>GUIDE ALPHABOT PRO v8.5</b>\n" + "\u2550" * 22 + "\n\n"
         "\U0001f9e0 <b>Méthode ICT/SMC :</b>\n"
         "1\ufe0f\u20e3 <b>H1 Bias</b> (BOS/CHoCH) \u2192 détecte la tendance\n"
@@ -2586,7 +2546,7 @@ def handle_marches(uid):
     try:
         db_register(uid, "")
         sn, sm, sl, wknd = get_session()
-        tg_send_and_track(uid,
+        tg_send(uid,
             "\U0001f4e1 <b>SCAN EN COURS...</b>\n"
             "\U0001f553 {} \u00b7 Score min : <b>{}</b>\n"
             "\u23f3 Analyse de {} marchés...".format(sl, sm, len(MARKETS)))
@@ -3073,12 +3033,9 @@ def handle_broadcast_message(uid, text):
 # ═══════════════════════════════════════════════════════════════
 #  ⑫ DISPATCHER — Tous les boutons et commandes
 # ═══════════════════════════════════════════════════════════════
-def dispatch_message(uid, uname, txt, user_msg_id=None):
+def dispatch_message(uid, uname, txt):
     # Mise à jour activité utilisateur
     threading.Thread(target=db_update_last_seen, args=(uid,), daemon=True).start()
-    # Supprimer le message bouton de l'utilisateur (nettoyage)
-    if user_msg_id:
-        threading.Thread(target=tg_delete, args=(uid, user_msg_id), daemon=True).start()
     # /start
     if txt.startswith("/start"):
         args   = txt.split()[1:]
@@ -3216,11 +3173,8 @@ def dispatch_message(uid, uname, txt, user_msg_id=None):
     # ── Fallback ──────────────────────────────────────────────
     else:
         db_register(uid, uname)
-        tg_send_and_track(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
+        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
 
-
-_processed_callbacks = set()
-_cb_lock = threading.Lock()
 
 def dispatch_callback(cb):
     """Route les boutons inline — tous les callback_data gérés."""
@@ -3228,22 +3182,9 @@ def dispatch_callback(cb):
     uname = cb["from"].get("username", "")
     data  = cb.get("data", "")
     cb_id = cb["id"]
-    # ── Anti-doublon : ignore si déjà traité ─────────────────
-    with _cb_lock:
-        if cb_id in _processed_callbacks:
-            return
-        _processed_callbacks.add(cb_id)
-        if len(_processed_callbacks) > 500:
-            oldest = list(_processed_callbacks)[:250]
-            for k in oldest:
-                _processed_callbacks.discard(k)
-    # Répondre immédiatement (SYNCHRONE) pour bloquer retry Telegram
+    # Répondre immédiatement (synchrone) — évite spinner bloqué
     tg_req("answerCallbackQuery", {"callback_query_id": cb_id})
     db_register(uid, uname)
-    # Mémoriser le message_id du message inline cliqué pour édition future
-    if cb.get("message") and cb["message"].get("message_id"):
-        with _umsg_lock:
-            _user_msg_id[uid] = cb["message"]["message_id"]
 
     if   data == "main":
         tg_send(uid, "\U0001f4cb Menu :", kb=kb_main())
@@ -3355,12 +3296,73 @@ def dispatch_callback(cb):
     elif data == "adm_bcast_pro" and uid == ADMIN_ID:
         handle_admin_broadcast_start(uid, "PRO")
     else:
-        tg_edit(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
+        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
 
 
 # ═══════════════════════════════════════════════════════════════
-#  ⑬ DÉMARRAGE
+#  ⑬ DÉMARRAGE + WEBHOOK
 # ═══════════════════════════════════════════════════════════════
+
+def process_update(upd):
+    """Traite un update Telegram (message ou callback)."""
+    try:
+        if "message" in upd:
+            msg   = upd["message"]
+            uid   = msg["from"]["id"]
+            uname = msg["from"].get("username", "")
+            txt   = msg.get("text", "").strip()
+            if txt:
+                def _handle_msg(uid=uid, uname=uname, txt=txt):
+                    if uid in _payment_state and _payment_state[uid].get("step") == "waiting_proof":
+                        cleaned = txt.strip()
+                        if len(cleaned) >= 20 and not cleaned.startswith("/"):
+                            handle_payment_proof_received(uid, uname, tx=cleaned)
+                        else:
+                            dispatch_message(uid, uname, txt)
+                    else:
+                        dispatch_message(uid, uname, txt)
+                threading.Thread(target=_handle_msg, daemon=True).start()
+
+        elif "callback_query" in upd:
+            cb = upd["callback_query"]
+            threading.Thread(target=dispatch_callback, args=(cb,), daemon=True).start()
+
+    except Exception as ex:
+        log("ERR", "process_update: {}".format(ex))
+
+
+def make_webhook_handler(scan_state):
+    """Crée le handler HTTP pour recevoir les updates Telegram via webhook."""
+    class WebhookHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = self.rfile.read(length)
+                upd    = json.loads(body.decode("utf-8"))
+                # Répondre immédiatement 200 OK à Telegram
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                # Traiter l'update dans un thread
+                threading.Thread(target=process_update, args=(upd,), daemon=True).start()
+            except Exception as ex:
+                log("ERR", "WebhookHandler: {}".format(ex))
+                try:
+                    self.send_response(200)
+                    self.end_headers()
+                except: pass
+
+        def do_GET(self):
+            # Health check pour Render
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"AlphaBot OK")
+
+        def log_message(self, *a): pass  # silence les logs HTTP
+
+    return WebhookHandler
+
+
 def startup():
     print_banner()
     db_init()
@@ -3369,22 +3371,6 @@ def startup():
     db_register(ADMIN_ID, "leaderOdg")
     db_activate_pro(ADMIN_ID, source="ADMIN_AUTO", days=None)
     print(clr("  Admin {} : PRO actif.".format(ADMIN_ID), "bold", "green"))
-
-    tg_req("deleteWebhook", {"drop_pending_updates": "true"})
-    time.sleep(2)
-    # ── Vider TOUS les anciens updates en attente ─────────────
-    skip_offset = 0
-    total_skipped = 0
-    for _ in range(10):  # max 10 x 100 = 1000 updates vidés
-        batch = tg_req("getUpdates", {"offset": skip_offset, "timeout": 0, "limit": 100}).get("result", [])
-        if not batch:
-            break
-        skip_offset = batch[-1]["update_id"] + 1
-        total_skipped += len(batch)
-    if total_skipped:
-        print(clr("  {} anciens updates ignorés (purge complète)".format(total_skipped), "dim"))
-    time.sleep(1)
-    log("INFO", clr("Webhook", "white") + "  " + clr("OK", "bold", "green"))
 
     sn, sm, sl, wknd = get_session()
     ok = tg_send(ADMIN_ID,
@@ -3401,92 +3387,101 @@ def startup():
 
     if not ok.get("ok"):
         log("ERR", clr("Connexion Telegram échouée — vérifie BOT_TOKEN", "red"))
-        return None
+        return False
 
     log("INFO", clr("Telegram OK — Bot actif", "bold", "green"))
     print()
-    return skip_offset
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════
-#  ⑭ BOUCLE PRINCIPALE
+#  ⑭ BOUCLE PRINCIPALE — MODE WEBHOOK
 # ═══════════════════════════════════════════════════════════════
-def _start_health_server():
-    """Mini serveur HTTP pour satisfaire Render (port binding requis)."""
-    class _H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"AlphaBot OK")
-        def log_message(self, *a): pass
-    port = int(os.environ.get("PORT", 10000))
-    srv  = HTTPServer(("0.0.0.0", port), _H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log("INFO", clr("Health server port {}".format(port), "bold", "green"))
-
-
 def main():
-    _start_health_server()
-    skip_offset = startup()
-    if skip_offset is None:
+    if not startup():
         return
 
-    offset    = skip_offset
-    last_scan = 0
+    port       = int(os.environ.get("PORT", 10000))
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-    while True:
+    if render_url:
+        # ── Mode WEBHOOK (Render avec URL publique) ───────────
+        webhook_url = "{}/webhook".format(render_url.rstrip("/"))
+
+        # Supprimer l'ancien webhook + tous les updates en attente
+        tg_req("deleteWebhook", {"drop_pending_updates": "true"})
+        time.sleep(2)
+
+        # Enregistrer le nouveau webhook
+        r = tg_req("setWebhook", {
+            "url":              webhook_url,
+            "drop_pending_updates": "true",
+            "max_connections":  10,
+        })
+        if r.get("ok"):
+            log("INFO", clr("Webhook enregistré : {}".format(webhook_url), "bold", "green"))
+        else:
+            log("ERR", clr("setWebhook échoué : {}".format(r), "red"))
+
+        scan_state = {"last": 0}
+        handler    = make_webhook_handler(scan_state)
+        server     = HTTPServer(("0.0.0.0", port), handler)
+        log("INFO", clr("Serveur webhook sur port {}".format(port), "bold", "green"))
+
+        # Scan périodique dans un thread séparé
+        def _scan_loop():
+            while True:
+                try:
+                    now = time.time()
+                    if now - scan_state["last"] >= SCAN_SEC:
+                        scan_state["last"] = now
+                        threading.Thread(target=scan_and_send, daemon=True).start()
+                except Exception as ex:
+                    log("ERR", "scan_loop: {}".format(ex))
+                time.sleep(10)
+
+        threading.Thread(target=_scan_loop, daemon=True).start()
+
         try:
-            upd_list = tg_updates(offset)
-            for upd in upd_list:
-                # Sauvegarder offset IMMÉDIATEMENT avant tout traitement
-                offset = upd["update_id"] + 1
-
-                if "message" in upd:
-                    msg    = upd["message"]
-                    uid    = msg["from"]["id"]
-                    uname  = msg["from"].get("username", "")
-                    txt    = msg.get("text", "").strip()
-                    msg_id = msg.get("message_id", 0)
-
-                    # ── Anti-doublon messages texte ───────────
-                    msg_key = (uid, msg_id)
-                    with _cb_lock:
-                        if msg_key in _processed_callbacks:
-                            continue
-                        _processed_callbacks.add(msg_key)
-
-                    if txt:
-                        def _handle_msg(uid=uid, uname=uname, txt=txt, umid=msg.get("message_id")):
-                            if uid in _payment_state and _payment_state[uid].get("step") == "waiting_proof":
-                                cleaned = txt.strip()
-                                if len(cleaned) >= 20 and not cleaned.startswith("/"):
-                                    handle_payment_proof_received(uid, uname, tx=cleaned)
-                                else:
-                                    dispatch_message(uid, uname, txt, user_msg_id=umid)
-                            else:
-                                dispatch_message(uid, uname, txt, user_msg_id=umid)
-                        threading.Thread(target=_handle_msg, daemon=True).start()
-
-                elif "callback_query" in upd:
-                    cb = upd["callback_query"]
-                    threading.Thread(target=dispatch_callback, args=(cb,), daemon=True).start()
-
-            now = time.time()
-            if now - last_scan >= SCAN_SEC:
-                last_scan = now
-                threading.Thread(target=scan_and_send, daemon=True).start()
-
-            # Pas de sleep nécessaire avec long polling (timeout=5)
-            pass
-
+            server.serve_forever()
         except KeyboardInterrupt:
-            print()
-            log("WARN", clr("Bot arrêté manuellement.", "yellow"))
+            log("WARN", clr("Bot arrêté.", "yellow"))
             tg_send(ADMIN_ID, "\U0001f6d1 Bot arrêté.")
-            break
-        except Exception as ex:
-            log("ERR", str(ex))
-            time.sleep(5)
+            tg_req("deleteWebhook", {})
+
+    else:
+        # ── Mode POLLING (local / dev) ────────────────────────
+        log("INFO", clr("Mode polling (pas de RENDER_EXTERNAL_URL)", "yellow"))
+        tg_req("deleteWebhook", {"drop_pending_updates": "true"})
+        time.sleep(2)
+        # Purger tous les anciens updates
+        offset = 0
+        for _ in range(20):
+            batch = tg_req("getUpdates", {"offset": offset, "timeout": 0, "limit": 100}).get("result", [])
+            if not batch: break
+            offset = batch[-1]["update_id"] + 1
+        log("INFO", clr("Purge terminée, offset={}".format(offset), "dim"))
+
+        last_scan = 0
+        while True:
+            try:
+                upd_list = tg_req("getUpdates", {"offset": offset, "timeout": 10, "limit": 100}).get("result", [])
+                for upd in upd_list:
+                    offset = upd["update_id"] + 1
+                    threading.Thread(target=process_update, args=(upd,), daemon=True).start()
+
+                now = time.time()
+                if now - last_scan >= SCAN_SEC:
+                    last_scan = now
+                    threading.Thread(target=scan_and_send, daemon=True).start()
+
+            except KeyboardInterrupt:
+                log("WARN", clr("Bot arrêté.", "yellow"))
+                tg_send(ADMIN_ID, "\U0001f6d1 Bot arrêté.")
+                break
+            except Exception as ex:
+                log("ERR", str(ex))
+                time.sleep(5)
 
 
 if __name__ == "__main__":
