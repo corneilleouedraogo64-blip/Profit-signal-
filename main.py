@@ -3184,19 +3184,16 @@ def dispatch_callback(cb):
     uname = cb["from"].get("username", "")
     data  = cb.get("data", "")
     cb_id = cb["id"]
-
     # ── Anti-doublon : ignore si déjà traité ─────────────────
     with _cb_lock:
         if cb_id in _processed_callbacks:
             return
         _processed_callbacks.add(cb_id)
-        # Nettoyer le set si trop grand (garde les 500 derniers)
         if len(_processed_callbacks) > 500:
             oldest = list(_processed_callbacks)[:250]
             for k in oldest:
                 _processed_callbacks.discard(k)
-
-    # Répondre immédiatement (SYNCHRONE) pour éviter retry Telegram
+    # Répondre immédiatement (SYNCHRONE) pour bloquer retry Telegram
     tg_req("answerCallbackQuery", {"callback_query_id": cb_id})
     db_register(uid, uname)
 
@@ -3326,13 +3323,18 @@ def startup():
     print(clr("  Admin {} : PRO actif.".format(ADMIN_ID), "bold", "green"))
 
     tg_req("deleteWebhook", {"drop_pending_updates": "true"})
-    time.sleep(1)
-    old = tg_req("getUpdates", {"offset": -1, "timeout": 1}).get("result", [])
+    time.sleep(2)
+    # ── Vider TOUS les anciens updates en attente ─────────────
     skip_offset = 0
-    if old:
-        skip_offset = old[-1]["update_id"] + 1
-        tg_req("getUpdates", {"offset": skip_offset, "timeout": 1})
-        print(clr("  {} anciens messages ignorés".format(len(old)), "dim"))
+    total_skipped = 0
+    for _ in range(10):  # max 10 x 100 = 1000 updates vidés
+        batch = tg_req("getUpdates", {"offset": skip_offset, "timeout": 0, "limit": 100}).get("result", [])
+        if not batch:
+            break
+        skip_offset = batch[-1]["update_id"] + 1
+        total_skipped += len(batch)
+    if total_skipped:
+        print(clr("  {} anciens updates ignorés (purge complète)".format(total_skipped), "dim"))
     time.sleep(1)
     log("INFO", clr("Webhook", "white") + "  " + clr("OK", "bold", "green"))
 
