@@ -19,3 +19,4 @@
 
 # ✅ Version Python recommandée : 3.8 ou supérieure
 # python3 --version
+alphabot_v14-33.pyzalphabot_v13.py
