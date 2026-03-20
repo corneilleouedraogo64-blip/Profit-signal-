@@ -1,3 +1,4 @@
+
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║   ALPHABOT v15 — EDITION RENTABILISATION                   ║
@@ -182,7 +183,7 @@ def http_get(url, headers=None, timeout=15):
             else: raise
     raise Exception("Max retries atteint")
 
-def http_post(url, data, timeout=15):
+def http_post(url, data, timeout=20):
     raw  = urllib.parse.urlencode(data).encode("utf-8")
     hdrs = {"Content-Type": "application/x-www-form-urlencoded"}
     for attempt in range(3):
@@ -223,7 +224,7 @@ def tg_send(chat_id, text, kb=None):
 def tg_updates(offset):
     return tg_req("getUpdates", {
         "offset":  offset,
-        "timeout": 0,
+        "timeout": 5,   # long polling 5s — réduit les appels et évite les doubles
         "limit":   100
     }).get("result", [])
 
@@ -3390,13 +3391,22 @@ def main():
         try:
             upd_list = tg_updates(offset)
             for upd in upd_list:
+                # Sauvegarder offset IMMÉDIATEMENT avant tout traitement
                 offset = upd["update_id"] + 1
 
                 if "message" in upd:
-                    msg   = upd["message"]
-                    uid   = msg["from"]["id"]
-                    uname = msg["from"].get("username", "")
-                    txt   = msg.get("text", "").strip()
+                    msg    = upd["message"]
+                    uid    = msg["from"]["id"]
+                    uname  = msg["from"].get("username", "")
+                    txt    = msg.get("text", "").strip()
+                    msg_id = msg.get("message_id", 0)
+
+                    # ── Anti-doublon messages texte ───────────
+                    msg_key = (uid, msg_id)
+                    with _cb_lock:
+                        if msg_key in _processed_callbacks:
+                            continue
+                        _processed_callbacks.add(msg_key)
 
                     if txt:
                         def _handle_msg(uid=uid, uname=uname, txt=txt):
@@ -3419,8 +3429,8 @@ def main():
                 last_scan = now
                 threading.Thread(target=scan_and_send, daemon=True).start()
 
-            # Sleep adaptatif : 0.05s si messages reçus, 0.1s si rien
-            time.sleep(0.05 if upd_list else 0.1)
+            # Pas de sleep nécessaire avec long polling (timeout=5)
+            pass
 
         except KeyboardInterrupt:
             print()
