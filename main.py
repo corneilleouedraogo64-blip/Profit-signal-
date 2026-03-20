@@ -209,6 +209,10 @@ def tg_req(method, params):
         print("  [TG] {}".format(e))
         return {}
 
+# Stocke le message_id du dernier message bot par utilisateur
+_user_msg_id = {}   # uid -> message_id
+_umsg_lock   = threading.Lock()
+
 def tg_send(chat_id, text, kb=None):
     p = {
         "chat_id":                  str(chat_id),
@@ -220,6 +224,42 @@ def tg_send(chat_id, text, kb=None):
         p["reply_markup"] = json.dumps(kb)
     with _tg_lock:
         return tg_req("sendMessage", p)
+
+def tg_edit(chat_id, text, kb=None):
+    """Édite le dernier message du bot pour cet utilisateur.
+    Si impossible (trop vieux, supprimé…), envoie un nouveau message."""
+    with _umsg_lock:
+        mid = _user_msg_id.get(chat_id)
+    if mid:
+        p = {
+            "chat_id":                  str(chat_id),
+            "message_id":               str(mid),
+            "text":                     text,
+            "parse_mode":               "HTML",
+            "disable_web_page_preview": "true"
+        }
+        if kb:
+            p["reply_markup"] = json.dumps(kb)
+        with _tg_lock:
+            r = tg_req("editMessageText", p)
+        if r.get("ok"):
+            return r
+    # Fallback : nouveau message
+    return tg_send_and_track(chat_id, text, kb)
+
+def tg_delete(chat_id, message_id):
+    """Supprime un message."""
+    tg_req("deleteMessage", {"chat_id": str(chat_id), "message_id": str(message_id)})
+
+def tg_send_and_track(chat_id, text, kb=None):
+    """Envoie un message ET mémorise son message_id pour édition future."""
+    r = tg_send(chat_id, text, kb)
+    if r and r.get("ok"):
+        mid = r["result"].get("message_id")
+        if mid:
+            with _umsg_lock:
+                _user_msg_id[chat_id] = mid
+    return r
 
 def tg_updates(offset):
     return tg_req("getUpdates", {
@@ -824,7 +864,7 @@ def send_welcome(uid, uname, ref_by=0):
         if is_pro else
         "\U0001f513 FREE \u2192 /pay"
     )
-    tg_send(uid,
+    tg_send_and_track(uid,
         "\U0001f916 <b>AlphaBot PRO v14 \u2014 Bienvenue {} !</b>\n".format(name_txt) +
         "\u2550" * 22 + "\n\n"
         "\U0001f194 <b>ID :</b> <code>{}</code>\n"
@@ -873,7 +913,7 @@ def send_account(uid, uname, forced_plan=None):
         plan_line = "\U0001f513 <b>FREE</b>  {}/{} sig aujourd'hui".format(count, lim)
 
     mode_banner = "\U0001f9ea <i>[Vue simulée — mode {}]</i>\n\n".format(forced_plan) if forced_plan else ""
-    tg_send(uid,
+    tg_send_and_track(uid,
         mode_banner +
         "\U0001f4ca <b>MON COMPTE</b>\n" + "\u2550" * 22 + "\n\n"
         "\U0001f464 @{}  <code>{}</code>\n"
@@ -929,7 +969,7 @@ def send_signals_info(uid):
             lines.append("\U0001f4a0 <b>Passe PRO pour max {}/j</b>\n/pay \u2014 {}$ USDT".format(
                 PRO_LIMIT, PRO_PROMO))
 
-    tg_send(uid, "\n".join(lines), kb=kb_back())
+    tg_send_and_track(uid, "\n".join(lines), kb=kb_back())
 
 def send_pro(uid):
     is_pro = db_is_pro(uid)
@@ -937,7 +977,7 @@ def send_pro(uid):
         tg_send_sticker(uid, STK_CROWN)
         plan, exp, src = db_get_pro_info(uid)
         exp_txt = "À VIE" if not exp else "expire le {}".format(exp)
-        tg_send(uid,
+        tg_send_and_track(uid,
             "\U0001f4a0 <b>Plan {} actif !</b> \u2705\n\n"
             "Accès : <b>{}</b>\nSignaux : max {}/j\n\nMerci \U0001f64f".format(
                 plan, exp_txt, PRO_LIMIT),
@@ -1003,7 +1043,7 @@ def send_pay(uid, plan_key="PRO"):
 def send_mes_gains(uid):
     stats = db_daily_stats(); rows = stats["rows"]
     if not rows:
-        tg_send(uid, "\U0001f4b8 <b>MES GAINS</b>\n\nAucun signal aujourd'hui.", kb=kb_back())
+        tg_send_and_track(uid, "\U0001f4b8 <b>MES GAINS</b>\n\nAucun signal aujourd'hui.", kb=kb_back())
         return
     lines = ["\U0001f4b8 <b>GAINS DU JOUR</b>", "\u2550" * 22, ""]
     for row in rows:
@@ -1077,7 +1117,7 @@ def send_rapports(uid):
         "\u26a0\ufe0f Estimations si TP atteint. Pas un conseil financier.",
         "\U0001f916 AlphaBot PRO  \u00b7  @AlphaBotForexBot"
     ]
-    tg_send(uid, "\n".join(lines), kb=kb_back())
+    tg_send_and_track(uid, "\n".join(lines), kb=kb_back())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1096,7 +1136,7 @@ def send_affilie(uid, uname):
     bar  = "\u2588" * int(done / REF_TARGET * 10) + "\u2591" * (10 - int(done / REF_TARGET * 10))
 
     # ── MESSAGE 1 : Texte promo direct prêt à partager ────────
-    tg_send(uid,
+    tg_send_and_track(uid,
         "\U0001f4cb <b>COPIE CE MESSAGE ET ENVOIE À TES AMIS :</b>\n\n"
         "\u2501" * 22 + "\n\n"
         "\U0001f916 <b>AlphaBot PRO</b> \u2014 Signaux trading GRATUITS !\n\n"
@@ -1133,7 +1173,7 @@ def send_affilie(uid, uname):
         kb=kb_back())
 
 def send_broker(uid):
-    tg_send(uid,
+    tg_send_and_track(uid,
         "\U0001f3e6 <b>BROKER \u2014 EXNESS</b>\n\n"
         "\u2705 Spread 0 pip (Raw)\n"
         "\u2705 Dépôt minimum 10$\n"
@@ -1144,7 +1184,7 @@ def send_broker(uid):
         kb=kb_back())
 
 def send_guide(uid):
-    tg_send(uid,
+    tg_send_and_track(uid,
         "\U0001f4d6 <b>GUIDE ALPHABOT PRO v8.5</b>\n" + "\u2550" * 22 + "\n\n"
         "\U0001f9e0 <b>Méthode ICT/SMC :</b>\n"
         "1\ufe0f\u20e3 <b>H1 Bias</b> (BOS/CHoCH) \u2192 détecte la tendance\n"
@@ -2546,7 +2586,7 @@ def handle_marches(uid):
     try:
         db_register(uid, "")
         sn, sm, sl, wknd = get_session()
-        tg_send(uid,
+        tg_send_and_track(uid,
             "\U0001f4e1 <b>SCAN EN COURS...</b>\n"
             "\U0001f553 {} \u00b7 Score min : <b>{}</b>\n"
             "\u23f3 Analyse de {} marchés...".format(sl, sm, len(MARKETS)))
@@ -3033,9 +3073,12 @@ def handle_broadcast_message(uid, text):
 # ═══════════════════════════════════════════════════════════════
 #  ⑫ DISPATCHER — Tous les boutons et commandes
 # ═══════════════════════════════════════════════════════════════
-def dispatch_message(uid, uname, txt):
+def dispatch_message(uid, uname, txt, user_msg_id=None):
     # Mise à jour activité utilisateur
     threading.Thread(target=db_update_last_seen, args=(uid,), daemon=True).start()
+    # Supprimer le message bouton de l'utilisateur (nettoyage)
+    if user_msg_id:
+        threading.Thread(target=tg_delete, args=(uid, user_msg_id), daemon=True).start()
     # /start
     if txt.startswith("/start"):
         args   = txt.split()[1:]
@@ -3173,7 +3216,7 @@ def dispatch_message(uid, uname, txt):
     # ── Fallback ──────────────────────────────────────────────
     else:
         db_register(uid, uname)
-        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
+        tg_send_and_track(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
 
 
 _processed_callbacks = set()
@@ -3197,6 +3240,10 @@ def dispatch_callback(cb):
     # Répondre immédiatement (SYNCHRONE) pour bloquer retry Telegram
     tg_req("answerCallbackQuery", {"callback_query_id": cb_id})
     db_register(uid, uname)
+    # Mémoriser le message_id du message inline cliqué pour édition future
+    if cb.get("message") and cb["message"].get("message_id"):
+        with _umsg_lock:
+            _user_msg_id[uid] = cb["message"]["message_id"]
 
     if   data == "main":
         tg_send(uid, "\U0001f4cb Menu :", kb=kb_main())
@@ -3308,7 +3355,7 @@ def dispatch_callback(cb):
     elif data == "adm_bcast_pro" and uid == ADMIN_ID:
         handle_admin_broadcast_start(uid, "PRO")
     else:
-        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
+        tg_edit(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3409,15 +3456,15 @@ def main():
                         _processed_callbacks.add(msg_key)
 
                     if txt:
-                        def _handle_msg(uid=uid, uname=uname, txt=txt):
+                        def _handle_msg(uid=uid, uname=uname, txt=txt, umid=msg.get("message_id")):
                             if uid in _payment_state and _payment_state[uid].get("step") == "waiting_proof":
                                 cleaned = txt.strip()
                                 if len(cleaned) >= 20 and not cleaned.startswith("/"):
                                     handle_payment_proof_received(uid, uname, tx=cleaned)
                                 else:
-                                    dispatch_message(uid, uname, txt)
+                                    dispatch_message(uid, uname, txt, user_msg_id=umid)
                             else:
-                                dispatch_message(uid, uname, txt)
+                                dispatch_message(uid, uname, txt, user_msg_id=umid)
                         threading.Thread(target=_handle_msg, daemon=True).start()
 
                 elif "callback_query" in upd:
