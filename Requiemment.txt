@@ -1,0 +1,21 @@
+# AlphaBot v13 — Requirements
+# Le bot utilise uniquement la bibliothèque standard Python 3.8+
+# Aucune dépendance externe requise !
+
+# Modules standard utilisés (déjà inclus dans Python) :
+# - json
+# - ssl
+# - time
+# - sqlite3
+# - threading
+# - urllib.request
+# - urllib.parse
+# - urllib.error
+# - datetime
+# - queue
+
+# ✅ Pour lancer le bot :
+# python3 alphabot_v13.py
+
+# ✅ Version Python recommandée : 3.8 ou supérieure
+# python3 --version
