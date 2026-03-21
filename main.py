@@ -2785,284 +2785,6 @@ def detect_fvg(c, bias, lookback=40):
     return best  # (bottom, top) ou None
 
 
-def dispatch_callback(cb):
-    """Route les boutons inline — tous les callback_data gérés."""
-    uid   = cb["from"]["id"]
-    uname = cb["from"].get("username", "")
-    data  = cb.get("data", "")
-    cb_id = cb["id"]
-    # Répondre immédiatement (synchrone) — évite spinner bloqué
-    tg_req("answerCallbackQuery", {"callback_query_id": cb_id})
-    db_register(uid, uname)
-
-    if   data == "main":
-        tg_send(uid, "\U0001f4cb Menu :", kb=kb_main())
-    elif data == "signals":
-        send_signals_info(uid)
-    elif data == "pro":
-        send_pro(uid)
-    elif data == "pay":
-        send_pay(uid)
-
-    # ── Flux paiement interactif ──────────────────────────────
-    elif data == "pay_submitted":
-        handle_pay_submitted(uid, uname)
-    elif data.startswith("pay_submitted_"):
-        plan_key = data.replace("pay_submitted_", "")
-        handle_pay_submitted(uid, uname, plan_key=plan_key)
-    elif data.startswith("pay_plan_"):
-        plan_key = data.replace("pay_plan_", "")
-        send_pay(uid, plan_key=plan_key)
-    elif data == "pay_confirm":
-        threading.Thread(target=handle_pay_confirm, args=(uid, uname), daemon=True).start()
-    elif data == "pay_cancel":
-        _payment_state.pop(uid, None)
-        tg_send(uid,
-            "\u274c <b>Paiement annulé.</b>\n\n"
-            "Reviens quand tu veux avec /pay ou le bouton \U0001f4b0 Devenir PRO.",
-            kb=kb_reply())
-    elif data == "broker":
-        send_broker(uid)
-    elif data == "ref":
-        send_affilie(uid, uname)
-    elif data == "ref_stats":
-        # Bouton "Voir mes filleuls" depuis le message promo
-        refs = db_get_refs(uid)
-        link = "https://t.me/{}?start={}".format(BOT_USERNAME, uid)
-        done = min(refs, REF_TARGET)
-        pct  = int(done / REF_TARGET * 100)
-        bar  = "\u2588" * int(done / REF_TARGET * 10) + "\u2591" * (10 - int(done / REF_TARGET * 10))
-        tg_send(uid,
-            "\U0001f91d <b>MES FILLEULS</b>\n" + "\u2550" * 22 + "\n\n"
-            "\U0001f517 Lien : <code>{}</code>\n\n"
-            "<b>{}/{}</b>  ({}%)\n[{}]\n\n"
-            "\U0001f3c6 {} filleuls = <b>{} MOIS PRO GRATUIT</b>\n"
-            "\u2705 Activation automatique".format(
-                link, done, REF_TARGET, pct, bar, REF_TARGET, REF_MONTHS),
-            kb=kb_back())
-    elif data == "rapports":
-        send_rapports(uid)
-    elif data == "guide":
-        threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
-    elif data == "account":
-        threading.Thread(target=send_account, args=(uid, uname), daemon=True).start()
-
-    # ── Boutons admin inline (notifs nouveaux users) ──────────
-    elif data.startswith("adm_pro_") and uid == ADMIN_ID:
-        try:
-            t_uid = int(data.split("_")[2])
-            db_activate_pro(t_uid, "ADMIN", days=None)
-            con = _conn(); cur = con.cursor()
-            cur.execute("SELECT username FROM users WHERE user_id=?", (t_uid,))
-            row = cur.fetchone(); con.close()
-            uname_t = "@" + (row[0] if row and row[0] else str(t_uid))
-            tg_send(ADMIN_ID, "\u2705 PRO activé : {} <code>{}</code>".format(uname_t, t_uid))
-            tg_send(t_uid,
-                "\U0001f389 <b>PRO activé !</b>\n\n"
-                "\u2705 Max {} signaux/j\n\u2705 24 paires + crypto week-end\n"
-                "\U0001f680 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
-        except Exception as ex:
-            tg_send(ADMIN_ID, "\u274c Erreur activation : {}".format(ex))
-
-    elif data.startswith("adm_ban_") and uid == ADMIN_ID:
-        try:
-            t_uid = int(data.split("_")[2])
-            plan,_,_ = get_pro_info(t_uid)
-            if plan == "PRO":
-                db_downgrade_pro(t_uid)
-                tg_send(t_uid, "🔒 <b>Accès PRO désactivé</b>\nPlan: FREE\n/pay pour revenir PRO.")
-                tg_send(ADMIN_ID, "✅ PRO → FREE : <code>{}</code>".format(t_uid),
-                    kb={"inline_keyboard":[[
-                        {"text":"🔄 Réactiver PRO","callback_data":"adm_pro_{}".format(t_uid)}
-                    ]]})
-            else:
-                # Refuser paiement
-                db_run("UPDATE payments SET status=\'REJECTED\' WHERE user_id=? AND status=\'PENDING\'",(t_uid,))
-                tg_send(ADMIN_ID, "❌ Paiement refusé : <code>{}</code>".format(t_uid))
-        except Exception as ex:
-            tg_send(ADMIN_ID, "❌ Erreur : {}".format(ex))
-
-    elif data == "adm_panel" and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_panel, args=(uid,), daemon=True).start()
-    elif data == "adm_stats" and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_stats, args=(uid,), daemon=True).start()
-    elif data == "adm_payments" and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_payments, args=(uid,), daemon=True).start()
-    elif data == "adm_reco" and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_reco, args=(uid,), daemon=True).start()
-    elif data == "adm_rapports" and uid == ADMIN_ID:
-        threading.Thread(target=send_rapports, args=(uid,), daemon=True).start()
-    elif data == "adm_scan" and uid == ADMIN_ID:
-        tg_send(uid, "📡 Scan forcé lancé !", kb=kb_admin_back())
-        threading.Thread(target=scan_and_send, daemon=True).start()
-    elif data == "adm_debug" and uid == ADMIN_ID:
-        threading.Thread(target=handle_debug, args=(uid,), daemon=True).start()
-    elif data == "adm_marches" and uid == ADMIN_ID:
-        threading.Thread(target=handle_marches, args=(uid,), daemon=True).start()
-    elif data.startswith("adm_membres_") and uid == ADMIN_ID:
-        pg = int(data.split("_")[-1])
-        threading.Thread(target=handle_membres, args=(uid, pg), daemon=True).start()
-    elif data == "adm_promo_list" and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_promo_list, args=(uid,), daemon=True).start()
-    elif data.startswith("adm_promo_send_") and uid == ADMIN_ID:
-        promo_id = data.replace("adm_promo_send_", "")
-        threading.Thread(target=broadcast_promo, args=(uid, promo_id), daemon=True).start()
-    elif data.startswith("adm_promo_") and uid == ADMIN_ID:
-        promo_id = data.replace("adm_promo_", "")
-        threading.Thread(target=send_promo_preview, args=(uid, promo_id), daemon=True).start()
-    elif data == "adm_bcast_all" and uid == ADMIN_ID:
-        handle_admin_broadcast_start(uid, "ALL")
-    elif data == "adm_bcast_pro" and uid == ADMIN_ID:
-        handle_admin_broadcast_start(uid, "PRO")
-    else:
-        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
-
-
-
-def dispatch_message(uid, uname, txt):
-    # Mise à jour activité utilisateur
-    threading.Thread(target=db_update_last_seen, args=(uid,), daemon=True).start()
-    # /start
-    if txt.startswith("/start"):
-        args   = txt.split()[1:]
-        ref_by = int(args[0]) if args and args[0].isdigit() else 0
-        send_welcome(uid, uname, ref_by)
-
-    # ── Boutons clavier principal ─────────────────────────────
-    elif txt == "\U0001f4e1 Mes Signaux":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_signals_info, args=(uid,), daemon=True).start()
-    elif txt == "\U0001f4ca Mon Compte":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        forced = _admin_test_mode if uid == ADMIN_ID and _admin_test_mode else None
-        threading.Thread(target=send_account, args=(uid, uname, forced), daemon=True).start()
-    elif txt == "\U0001f4b0 Devenir PRO":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_pro, args=(uid,), daemon=True).start()
-    elif txt == "\U0001f91d Parrainage":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start()
-    elif txt == "\U0001f4b8 Mes Gains":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_mes_gains, args=(uid,), daemon=True).start()
-    elif txt == "\U0001f4d6 Guide ICT":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
-    elif txt == "\U0001f4c8 Rapports":
-        db_register(uid, uname)
-        tg_req("sendChatAction", {"chat_id": str(uid), "action": "typing"})
-        threading.Thread(target=send_rapports, args=(uid,), daemon=True).start()
-    elif txt == "\U0001f3e6 Broker Exness":
-        db_register(uid, uname)
-        threading.Thread(target=send_broker, args=(uid,), daemon=True).start()
-
-    # ── Alias anciens boutons (rétrocompatibilité) ────────────
-    elif txt in ("\U0001f91d Devenir Affilié", "\U0001f4e1 Parrainage",
-                 "\U0001f381 Partager et Récompenses"):
-        db_register(uid, uname); send_affilie(uid, uname)
-    elif txt in ("\U0001f4ca Mon Tableau de Bord", "\U0001f4ca Mon compte"):
-        db_register(uid, uname)
-        threading.Thread(target=send_account, args=(uid, uname), daemon=True).start()
-    elif txt in ("\U0001f4b0 Mes Gains", "\U0001f4c8 Mes Gains"):
-        db_register(uid, uname); send_mes_gains(uid)
-    elif txt in ("\u2753 Comment ça marche ?", "\U0001f4d6 Guide AlphaBot"):
-        db_register(uid, uname)
-        threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
-    elif txt in ("\U0001f4b0 Paiement USDT", "\U0001f4a0 Devenir PRO"):
-        db_register(uid, uname); send_pay(uid)
-    elif txt == "\U0001f465 Groupe VIP":
-        # Ancien bouton — redirige vers rapports
-        db_register(uid, uname); send_rapports(uid)
-
-    # ── Commandes texte ───────────────────────────────────────
-    elif txt in ("/menu", "menu"):
-        db_register(uid, uname)
-        tg_send(uid, "\U0001f4cb Menu :", kb=kb_main())
-    elif txt.startswith("/pay"):
-        db_register(uid, uname); send_pay(uid)
-    elif txt.startswith("/pro"):
-        db_register(uid, uname); send_pro(uid)
-    elif txt.startswith("/ref"):
-        db_register(uid, uname); send_affilie(uid, uname)
-    elif txt.startswith("/broker"):
-        db_register(uid, uname); send_broker(uid)
-    elif txt.startswith("/rapports") or txt.startswith("/report"):
-        db_register(uid, uname); send_rapports(uid)
-    elif txt.startswith("/guide") or txt.startswith("/pdf"):
-        db_register(uid, uname)
-        threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
-    elif txt.startswith("/account"):
-        db_register(uid, uname)
-        threading.Thread(target=send_account, args=(uid, uname), daemon=True).start()
-    elif txt.startswith("/support"):
-        db_register(uid, uname)
-        tg_send(uid,
-            "\U0001f4e9 <b>Support</b>\n"
-            "ID : <code>{}</code>\n\U0001f449 @leaderOdg".format(uid))
-    elif txt.startswith("/txhash"):
-        parts = txt.split()
-        if len(parts) >= 2:
-            db_register(uid, uname)
-            threading.Thread(
-                target=handle_txhash, args=(uid, uname, parts[1]), daemon=True).start()
-        else:
-            tg_send(uid, "Usage :\n<code>/txhash COLLE_TON_HASH</code>")
-
-    # ── Commandes admin ───────────────────────────────────────
-    elif txt in ("/admin", "/panel") and uid == ADMIN_ID:
-        threading.Thread(target=send_admin_panel, args=(uid,), daemon=True).start()
-
-    elif txt == "/annuler" and uid == ADMIN_ID:
-        _broadcast_pending.pop(uid, None)
-        tg_send(uid, "❌ Broadcast annulé.", kb=kb_reply())
-
-    elif uid == ADMIN_ID and txt and not txt.startswith("/") and handle_broadcast_message(uid, txt):
-        pass  # broadcast géré
-
-    elif txt.startswith("/activate"):
-        parts = txt.split()
-        handle_activate(uid, parts[1] if len(parts) >= 2 else "")
-    elif txt.startswith("/degrade"):
-        parts = txt.split()
-        handle_degrade(uid, parts[1] if len(parts) >= 2 else "")
-    elif txt.startswith("/testfree"):
-        handle_testfree(uid)
-    elif txt.startswith("/testpro"):
-        handle_testpro(uid)
-    elif txt.startswith("/monstatus"):
-        threading.Thread(target=handle_monstatus, args=(uid,), daemon=True).start()
-    elif txt.startswith("/marches"):
-        threading.Thread(target=handle_marches, args=(uid,), daemon=True).start()
-    elif txt.startswith("/scan"):
-        threading.Thread(target=handle_scan, args=(uid,), daemon=True).start()
-    elif txt.startswith("/debug"):
-        threading.Thread(target=handle_debug, args=(uid,), daemon=True).start()
-    elif txt.startswith("/resetcount"):
-        parts = txt.split()
-        handle_resetcount(uid, parts[1] if len(parts) >= 2 else "")
-    elif txt.startswith("/membres"):
-        parts = txt.split()
-        pg    = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 1
-        threading.Thread(target=handle_membres, args=(uid, pg), daemon=True).start()
-    elif txt.startswith("/stats"):
-        threading.Thread(target=handle_stats, args=(uid,), daemon=True).start()
-    elif txt.startswith("/stop") and uid == ADMIN_ID:
-        tg_send(uid, "\U0001f6d1 Bot arrêté.")
-        raise KeyboardInterrupt
-
-    # ── Fallback ──────────────────────────────────────────────
-    else:
-        db_register(uid, uname)
-        tg_send(uid, "\U0001f916 Choisis une option :", kb=kb_reply())
-
-
-
 def find_breakers(c, b, lookback=120):
     last = c[-1]["c"]; res = []; atr = calc_atr(c)
     scan = c[-lookback:] if len(c) > lookback else c
@@ -4054,6 +3776,10 @@ def send_welcome(uid, uname, ref_by=0):
         "📖 /guide ou choisis ci-dessous ↓".format(TRIAL_DAYS,PRO_LIMIT,REF_TARGET,REF_MONTHS),
         kb=kb_reply())    # ← clavier physique persistant
 
+def send_start(uid, uname, ref_by=0):
+    """Alias for send_welcome."""
+    send_welcome(uid, uname)
+
 def send_signals_info(uid):
     p = is_pro(uid); st = daily_stats(); rows = st["rows"]
     sn,sm,sl_l,wknd = get_session()
@@ -4580,68 +4306,152 @@ def dispatch(uid, uname, txt):
 
 
 def dispatch_cb(cb):
-    uid=cb["from"]["id"]; uname=cb.get("from",{}).get("username",""); data=cb.get("data","")
-    try: tg_req("answerCallbackQuery",{"callback_query_id":cb["id"]})
+    """Gère tous les boutons inline Telegram."""
+    uid   = cb["from"]["id"]
+    uname = cb.get("from", {}).get("username", "")
+    data  = cb.get("data", "")
+    # Répondre immédiatement à Telegram (évite le spinner bloqué)
+    try: tg_req("answerCallbackQuery", {"callback_query_id": cb["id"]})
     except: pass
-    if data=="start": send_start(uid,uname)
-    elif data=="signals": tg_send(uid,"📡 Signaux envoyés automatiquement!\n\n⚡ Mode Improvisation actif — signal même sans setup ICT parfait.",kb=kb_back())
-    elif data=="rapports": threading.Thread(target=send_rapports,args=(uid,),daemon=True).start()
-    elif data=="account": send_account(uid,uname)
-    elif data=="challenge": send_challenge(uid)
-    elif data=="pay": send_pay(uid)
-    elif data=="pay_submitted": handle_pay_submitted(uid,uname)
-    elif data=="pay_confirm": handle_pay_confirm(uid,uname)
-    elif data=="pay_cancel": _pay_state.pop(uid,None); tg_send(uid,"❌ Annulé.",kb=kb_back())
-    elif data=="ref": send_ref(uid,uname)
-    elif data=="broker": send_broker(uid)
-    elif data=="guide": threading.Thread(target=send_guide,args=(uid,),daemon=True).start()
-    elif data=="signals": threading.Thread(target=send_signals_info,args=(uid,),daemon=True).start()
-    elif data=="pro": threading.Thread(target=send_pro_page,args=(uid,),daemon=True).start()
-    elif data=="ref_stats":
-        refs=get_refs(uid); link="https://t.me/{}?start={}".format(BOT_USER,uid)
-        done=min(refs,REF_TARGET); bar="█"*int(done/REF_TARGET*10)+"░"*(10-int(done/REF_TARGET*10))
-        tg_send(uid,"🤝 <b>MES FILLEULS</b>\n"+"═"*22+"\n\n🔗 <code>{}</code>\n\n<b>{}/{}</b>  ({}%)\n[{}]\n\n🏆 {} filleuls = <b>{} MOIS PRO</b>\n✅ Activation automatique".format(link,done,REF_TARGET,int(done/REF_TARGET*100),bar,REF_TARGET,REF_MONTHS),kb=kb_back())
-    elif data.startswith("pay_plan_"): send_pay_plan(uid,data.replace("pay_plan_",""))
-    elif data.startswith("pay_submitted_"): handle_pay_submitted(uid,uname); _pay_state[uid]["plan"]=data.replace("pay_submitted_","")
-    elif data=="adm_reco" and uid==ADMIN_ID: threading.Thread(target=send_admin_reco,args=(uid,),daemon=True).start()
-    elif data=="adm_rapports" and uid==ADMIN_ID: threading.Thread(target=send_rapports,args=(uid,),daemon=True).start()
-    elif data=="adm_debug" and uid==ADMIN_ID:
-        if not _last_results: tg_send(uid,"Aucun scan."); 
-        else:
-            lines=["🔍 <b>DEBUG DERNIER SCAN</b>",""]
-            found=[r for r in _last_results if r.get("found")]; nf=[r for r in _last_results if not r.get("found")]
-            if found: lines.append("✅ <b>SIGNAUX ({}):</b>".format(len(found)))
-            for r in found: lines.append("  🟢 {} {} RR 1:{} Score {}{}".format(r["name"],r["signal"]["side"],r["signal"]["rr"],r["signal"]["score"]," ⚡" if r.get("improv") else ""))
-            reasons={}
-            for r in nf: reasons.setdefault(r.get("reason","?"),[]).append(r["name"])
-            lines.append("\n⚪ <b>REJETÉS ({}):</b>".format(len(nf)))
-            for reason,names in sorted(reasons.items(),key=lambda x:-len(x[1])): lines.append("  <b>{}</b> ({}x): {}".format(reason,len(names),", ".join(names[:5])))
-            tg_send(uid,"\n".join(lines))
-    elif data.startswith("adm_membres_") and uid==ADMIN_ID:
-        pg=int(data.split("_")[-1]); per=20
-        rows=db_all("SELECT user_id,username,plan,ref_count,joined,pro_expires FROM users ORDER BY joined DESC LIMIT ? OFFSET ?",(per,(pg-1)*per))
-        total2=db_one("SELECT COUNT(*) FROM users")[0]; tp=max(1,(total2+per-1)//per)
-        msg2="👥 <b>MEMBRES {}/{}</b> ({} total)\n"+"═"*22+"\n".format(pg,tp,total2)
-        for ru,un,pl,rc,jd,exp in rows: msg2+="{}@{}  <code>{}</code>  🤝{}  {}{}\n".format("💠 " if pl=="PRO" else "⚪ ",un or "?",ru,rc,(jd or "")[:10],"  exp:"+exp[:10] if exp else "")
-        if pg>1: msg2+="⬅️ /membres {}  ".format(pg-1)
-        if pg<tp: msg2+="➡️ /membres {}".format(pg+1)
-        tg_send(uid,msg2)
-    elif data=="adm_promo_list" and uid==ADMIN_ID: threading.Thread(target=send_promo_list,args=(uid,),daemon=True).start()
-    elif data.startswith("adm_promo_send_") and uid==ADMIN_ID: threading.Thread(target=broadcast_promo,args=(uid,data.replace("adm_promo_send_","")),daemon=True).start()
-    elif data.startswith("adm_promo_") and uid==ADMIN_ID: threading.Thread(target=send_promo_preview,args=(uid,data.replace("adm_promo_","")),daemon=True).start()
-    elif data=="adm_bcast_all" and uid==ADMIN_ID: handle_bcast_start(uid,"ALL")
-    elif data=="adm_bcast_pro" and uid==ADMIN_ID: handle_bcast_start(uid,"PRO")
-    elif data=="adm_pays" and uid==ADMIN_ID: threading.Thread(target=send_admin_payments_full,args=(uid,),daemon=True).start()
-    elif data=="adm_scan" and uid==ADMIN_ID: tg_send(uid,"📡 Scan forcé...",kb=kb_admin_back()); threading.Thread(target=scan_and_send,daemon=True).start()
-    elif data=="adm_marches" and uid==ADMIN_ID: threading.Thread(target=handle_marches_full,args=(uid,),daemon=True).start()
-    elif data=="adm_markets" and uid==ADMIN_ID:
-        reg=AI_REG; ch=chal_get()
-        tg_send(uid,"🌍 <b>MARCHÉS & IA</b>\n\nRégime: <b>{}</b> — {}\nATR:{:.1f}%  Mom:{:.1f}%\n\nChallenge: {:.4f}$ AM:{}/4\nPositions: {}/{}\n⚡ Mode Improvisation: actif".format(reg.get("regime","?"),reg.get("label","?"),reg.get("atr_pct",0),reg.get("mom",0),ch["balance"],ch["am_cycle"],sum(1 for t in AI_OT.values() if t["status"]=="open"),MAX_OPEN))
-    elif data.startswith("adm_pro_") and uid==ADMIN_ID:
-        t=int(data.split("_")[2]); db_pro(t,"ADMIN_CB",days=None)
-        tg_send(t,"🎉 <b>PRO Activé!</b>\n✅ {} signaux/j\n⚡ Mode Improvisation!".format(PRO_LIMIT)); tg_send(uid,"✅ PRO: <code>{}</code>".format(t))
-    elif data.startswith("adm_ban_") and uid==ADMIN_ID:
-        t=int(data.split("_")[2]); db_run("UPDATE payments SET status='REJECTED' WHERE user_id=? AND status='PENDING'",(t,)); tg_send(uid,"❌ Refusé: <code>{}</code>".format(t))
+    db_register(uid, uname)
+
+    # ── Navigation principale ─────────────────────────────────
+    if   data == "start":   send_welcome(uid, uname)
+    elif data == "signals": threading.Thread(target=send_signals_info, args=(uid,), daemon=True).start()
+    elif data == "account": threading.Thread(target=send_account, args=(uid, uname), daemon=True).start()
+    elif data == "rapports":threading.Thread(target=send_rapports, args=(uid,), daemon=True).start()
+    elif data == "challenge":send_challenge(uid)
+    elif data == "pro":     threading.Thread(target=send_pro_page, args=(uid,), daemon=True).start()
+    elif data == "pay":     send_pay_plan(uid)
+    elif data == "ref":     threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start()
+    elif data == "broker":  send_broker(uid)
+    elif data == "guide":   threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
+
+    # ── Paiement ─────────────────────────────────────────────
+    elif data == "pay_submitted":
+        handle_pay_submitted(uid, uname)
+    elif data.startswith("pay_submitted_"):
+        handle_pay_submitted(uid, uname, plan_key=data.replace("pay_submitted_",""))
+    elif data.startswith("pay_plan_"):
+        send_pay_plan(uid, plan_key=data.replace("pay_plan_",""))
+    elif data == "pay_confirm":
+        threading.Thread(target=handle_pay_confirm, args=(uid, uname), daemon=True).start()
+    elif data == "pay_cancel":
+        _pay_state.pop(uid, None)
+        tg_send(uid, "❌ Paiement annulé.", kb=kb_back())
+
+    # ── Parrainage ────────────────────────────────────────────
+    elif data == "ref_stats":
+        refs = get_refs(uid)
+        link = "https://t.me/{}?start={}".format(BOT_USER, uid)
+        done = min(refs, REF_TARGET)
+        bar  = "█"*int(done/REF_TARGET*10) + "░"*(10-int(done/REF_TARGET*10))
+        tg_send(uid,
+            "🤝 <b>MES FILLEULS</b>\n" + "═"*22 + "\n\n"
+            "🔗 <code>{}</code>\n\n"
+            "<b>{}/{}</b>  ({}%)\n[{}]\n\n"
+            "🏆 {} filleuls = {} MOIS PRO".format(
+                link, done, REF_TARGET, int(done/REF_TARGET*100), bar,
+                REF_TARGET, REF_MONTHS),
+            kb=kb_back())
+
+    # ── Admin ─────────────────────────────────────────────────
+    elif data == "adm_panel" and uid == ADMIN_ID:
+        threading.Thread(target=send_admin_full, args=(uid,), daemon=True).start()
+    elif data == "adm_stats" and uid == ADMIN_ID:
+        threading.Thread(target=send_admin_stats_full, args=(uid,), daemon=True).start()
+    elif data == "adm_pays" and uid == ADMIN_ID:
+        threading.Thread(target=send_admin_payments_full, args=(uid,), daemon=True).start()
+    elif data == "adm_scan" and uid == ADMIN_ID:
+        tg_send(uid, "📡 Scan forcé...", kb=kb_admin_back())
+        threading.Thread(target=scan_and_send, daemon=True).start()
+    elif data == "adm_rapports" and uid == ADMIN_ID:
+        threading.Thread(target=send_rapports, args=(uid,), daemon=True).start()
+    elif data == "adm_reco" and uid == ADMIN_ID:
+        threading.Thread(target=send_admin_reco, args=(uid,), daemon=True).start()
+    elif data == "adm_debug" and uid == ADMIN_ID:
+        if not _last_results:
+            tg_send(uid, "Aucun scan encore."); return
+        lines = ["🔍 <b>DEBUG DERNIER SCAN</b>", ""]
+        found = [r for r in _last_results if r.get("found")]
+        nf    = [r for r in _last_results if not r.get("found")]
+        if found:
+            lines.append("✅ <b>SIGNAUX ({}):</b>".format(len(found)))
+            for r in found:
+                s = r["signal"]
+                lines.append("  🟢 {} {}  RR 1:{}  Score {}{}".format(
+                    r["name"], s["side"], s["rr"], s["score"],
+                    " ⚡" if r.get("improv") else ""))
+        reasons = {}
+        for r in nf: reasons.setdefault(r.get("reason","?"), []).append(r["name"])
+        lines.append("\n⚪ <b>REJETÉS ({}):</b>".format(len(nf)))
+        for reason, names in sorted(reasons.items(), key=lambda x: -len(x[1])):
+            lines.append("  <b>{}</b> ({}): {}".format(reason, len(names), ", ".join(names[:5])))
+        tg_send(uid, "\n".join(lines))
+    elif data == "adm_marches" and uid == ADMIN_ID:
+        threading.Thread(target=handle_marches_full, args=(uid,), daemon=True).start()
+    elif data == "adm_promo_list" and uid == ADMIN_ID:
+        threading.Thread(target=send_promo_list, args=(uid,), daemon=True).start()
+    elif data.startswith("adm_promo_send_") and uid == ADMIN_ID:
+        pid = data.replace("adm_promo_send_", "")
+        threading.Thread(target=broadcast_promo, args=(uid, pid), daemon=True).start()
+    elif data.startswith("adm_promo_") and uid == ADMIN_ID:
+        pid = data.replace("adm_promo_", "")
+        threading.Thread(target=send_promo_preview, args=(uid, pid), daemon=True).start()
+    elif data == "adm_bcast_all" and uid == ADMIN_ID:
+        handle_bcast_start(uid, "ALL")
+    elif data == "adm_bcast_pro" and uid == ADMIN_ID:
+        handle_bcast_start(uid, "PRO")
+    elif data.startswith("adm_membres_") and uid == ADMIN_ID:
+        pg = int(data.split("_")[-1])
+        threading.Thread(target=handle_membres, args=(uid, pg), daemon=True).start()
+
+    # ── Toggle PRO/FREE admin ─────────────────────────────────
+    elif data.startswith("adm_pro_") and uid == ADMIN_ID:
+        try:
+            t_uid = int(data.split("_")[2])
+            plan, _, _ = get_pro_info(t_uid)
+            if plan != "PRO":
+                db_activate_pro(t_uid, "ADMIN", days=None)
+                tg_send(t_uid,
+                    "🎉 <b>PRO activé !</b>\n\n"
+                    "✅ Max {} signaux/jour\n"
+                    "⚡ Mode Improvisation inclus\n"
+                    "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
+                tg_send(uid, "✅ PRO activé : <code>{}</code>".format(t_uid),
+                    kb={"inline_keyboard": [[
+                        {"text": "🔒 Désactiver PRO",
+                         "callback_data": "adm_ban_{}".format(t_uid)}]]})
+            else:
+                tg_send(uid, "ℹ️ Déjà PRO : <code>{}</code>".format(t_uid))
+        except Exception as ex:
+            tg_send(uid, "❌ {}".format(ex))
+
+    elif data.startswith("adm_ban_") and uid == ADMIN_ID:
+        try:
+            t_uid = int(data.split("_")[2])
+            plan, _, _ = get_pro_info(t_uid)
+            if plan == "PRO":
+                db_downgrade_pro(t_uid)
+                tg_send(t_uid,
+                    "🔒 <b>PRO désactivé</b>\n"
+                    "Plan : FREE ({} signaux/jour)\n"
+                    "/pay pour revenir PRO.".format(FREE_LIMIT))
+                tg_send(uid, "✅ FREE : <code>{}</code>".format(t_uid),
+                    kb={"inline_keyboard": [[
+                        {"text": "🔄 Réactiver PRO",
+                         "callback_data": "adm_pro_{}".format(t_uid)}]]})
+            else:
+                # Refuser paiement
+                db_run("UPDATE payments SET status='REJECTED' WHERE user_id=? AND status='PENDING'", (t_uid,))
+                tg_send(uid, "❌ Paiement refusé : <code>{}</code>".format(t_uid))
+        except Exception as ex:
+            tg_send(uid, "❌ {}".format(ex))
+
+    # ── Fallback ──────────────────────────────────────────────
+    else:
+        send_welcome(uid, uname)
+
 
 def handle_new_group_member(uid, uname, first_name):
     """
@@ -4825,13 +4635,22 @@ def main():
     port = int(os.environ.get("PORT", 10000))
     render = os.environ.get("RENDER_EXTERNAL_URL", "")
     if render:
-        # ══ PRIORITÉ ABSOLUE : ouvrir le port HTTP en premier ══
-        # Render exige un port ouvert dans les 60 secondes
+        # ── ÉTAPE 1 : DB init synchrone (OBLIGATOIRE avant tout) ─
+        db_init()
+        db_register(ADMIN_ID, "leaderOdg")
+        db_pro(ADMIN_ID, "ADMIN_AUTO", days=None)
+        log("INFO", clr("DB OK", "b", "g"))
+
+        # ── ÉTAPE 2 : Ouvrir le port HTTP (Render détecte ici) ───
         server = HTTPServer(("0.0.0.0", port), make_wh())
         log("INFO", clr("Port {} ouvert — Render OK".format(port), "b", "g"))
-        # Tout le reste en arrière-plan
+
+        # ── ÉTAPE 3 : Telegram + IA en arrière-plan ──────────────
         def _init_bg():
-            startup()  # db_init, register admin, notify Telegram
+            # Binance data
+            threading.Thread(target=refresh_exch, daemon=True).start()
+            threading.Thread(target=refresh_ai, daemon=True).start()
+            # Configurer le webhook
             tg_req("deleteWebhook", {"drop_pending_updates": "true"})
             time.sleep(1)
             r = tg_req("setWebhook", {
@@ -4840,8 +4659,25 @@ def main():
                 "max_connections": 10,
                 "allowed_updates": '["message","callback_query","chat_member","my_chat_member"]'
             })
-            if r.get("ok"): log("INFO", clr("Webhook OK", "b", "g"))
+            if r.get("ok"): log("INFO", clr("Webhook OK — Bot prêt!", "b", "g"))
             else: log("ERR", clr("Webhook échoué: {}".format(r), "red"))
+            # Message de démarrage admin
+            sn, sm, sl_l, wknd = get_session()
+            ch = chal_get()
+            tg_send(ADMIN_ID,
+                "🤖 <b>AlphaBot PRO v9 — EN LIGNE !</b>\n\n"
+                "✅ DB initialisée\n"
+                "✅ Port {} ouvert\n"
+                "✅ Webhook configuré\n\n"
+                "🕐 Session : <b>{}</b>  Score min : <b>{}</b>\n"
+                "🌍 Régime IA : <b>{}</b>\n"
+                "🏆 Challenge : <b>{:.4f}$</b>\n\n"
+                "📡 FREE {}/j  ·  PRO {}/j\n"
+                "🛠 /admin pour le panel".format(
+                    port, sl_l, sm,
+                    AI_REG.get("regime", "Init"),
+                    ch["balance"], FREE_LIMIT, PRO_LIMIT),
+                kb=kb_reply())
         threading.Thread(target=_init_bg, daemon=True).start()
         state = {"ls": 0, "la": 0, "lc": 0}
         def _loop():
@@ -4863,7 +4699,13 @@ def main():
         except KeyboardInterrupt: tg_send(ADMIN_ID,"🛑 Bot arrêté."); tg_req("deleteWebhook",{})
     else:
         log("INFO",clr("Mode polling local","y"))
-        tg_req("deleteWebhook",{"drop_pending_updates":"true"}); time.sleep(2)
+        # DB init synchrone
+        db_init()
+        db_register(ADMIN_ID, "leaderOdg")
+        db_pro(ADMIN_ID, "ADMIN_AUTO", days=None)
+        threading.Thread(target=refresh_exch, daemon=True).start()
+        threading.Thread(target=refresh_ai, daemon=True).start()
+        tg_req("deleteWebhook",{"drop_pending_updates":"true"}); time.sleep(1)
         # Purge old updates
         offset=0
         for _ in range(20):
