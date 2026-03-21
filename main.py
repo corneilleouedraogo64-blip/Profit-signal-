@@ -68,6 +68,7 @@ DATA_MAX_AGE_MIN = DATA_MAX_AGE
 BOT_USERNAME     = BOT_USER
 PRO_PROMO        = PRO_PRICE
 NB_AGENTS        = 20
+VIP_CHANNEL      = VIP_CH       # alias v13
 
 
 # ══════════════════════════════════════════════════════
@@ -706,14 +707,16 @@ def agent_analyze(m, score_min, news_ok, q):
                 if risk<=0 or risk>a*10: pass
                 else:
                     tp=(eq_h*0.9995) if (eq_h and e<eq_h<e+risk*5) else e+risk*2.5
-                    gain=abs(tp-e); rr=round(gain/risk,1)
-                    if rr>=2.5:
+                    gain_brut=abs(tp-e); gain_net=gain_brut-sp_p
+                    # RR net : spread déduit du gain ET ajouté au risque
+                    rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
+                    if rr>=2.0:  # seuil 2.0 (2.5 avec spread inclus ≈ 2.0 net)
                         badges=[]
                         if in_ote: badges.append("OTE ✓")
                         if fvg_z: badges.append("FVG ✓")
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                        ptp=gain/pip; psl=abs(sl-e)/pip
+                        ptp=gain_net/pip; psl=(risk+sp_p)/pip  # pips nets
                         sig={"name":m["name"],"cat":m["cat"],"side":"BUY","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
@@ -725,14 +728,15 @@ def agent_analyze(m, score_min, news_ok, q):
                 if risk<=0 or risk>a*10: pass
                 else:
                     tp=(eq_l*1.0005) if (eq_l and e-risk*5<eq_l<e) else e-risk*2.5
-                    gain=abs(tp-e); rr=round(gain/risk,1)
-                    if rr>=2.5:
+                    gain_brut=abs(tp-e); gain_net=gain_brut-sp_p
+                    rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
+                    if rr>=2.0:
                         badges=[]
                         if in_ote: badges.append("OTE ✓")
                         if fvg_z: badges.append("FVG ✓")
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                        ptp=gain/pip; psl=abs(sl-e)/pip
+                        ptp=gain_net/pip; psl=(risk+sp_p)/pip
                         sig={"name":m["name"],"cat":m["cat"],"side":"SELL","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
@@ -1184,18 +1188,109 @@ _sent=set(); _sent_lk=threading.Lock()
 _last_d=""; _last_w=""; _scan_run=False; _test_mode=""
 _last_results=[]; _pay_state={}
 # v13 compat aliases
-_sent_lock   = _sent_lk
-_last_daily  = _last_d
-_last_weekly = _last_w
-_scan_running = False
-_admin_test_mode = ""
+_sent_lock         = _sent_lk
+_last_daily        = _last_d
+_last_weekly       = _last_w
+_scan_running      = False
+_admin_test_mode   = ""
 _last_scan_results = []
-_payment_state = _pay_state
-_broadcast_pending = {}
+_payment_state     = _pay_state
+_broadcast_pending = {}    # partagé avec _bcast_pending
 
 def cleanup_sent(ds):
     global _sent
     with _sent_lk: _sent={k for k in _sent if ds in k}
+
+
+# ══════════════════════════════════════════════════════
+#  RAPPORT DE FIN DE SESSION
+# ══════════════════════════════════════════════════════
+_last_session_reported = ""
+
+def check_session_end_report():
+    """
+    Détecte la fin d'une session et envoie un rapport.
+    Sessions avec rapport : LONDON_KZ (fin 10h), NY (fin 21h), OVERLAP (fin 16h)
+    """
+    global _last_session_reported
+    now = datetime.now(timezone.utc)
+    h, m = now.hour, now.minute
+    # Fin de session = première minute après la fin
+    session_ends = {
+        10: ("LONDON_KZ", "🇬🇧 London Kill Zone"),
+        12: ("LONDON",    "🇬🇧 Londres AM"),
+        16: ("OVERLAP",   "🇬🇧+🇺🇸 London+NY"),
+        21: ("NY",        "🇺🇸 New York"),
+    }
+    if h in session_ends and m == 0:
+        sess_key = session_ends[h][0]
+        sess_lbl = session_ends[h][1]
+        report_key = "{}-{}-{}".format(
+            now.strftime("%Y-%m-%d"), h, sess_key)
+        if report_key == _last_session_reported:
+            return
+        _last_session_reported = report_key
+        threading.Thread(
+            target=_send_session_report,
+            args=(sess_lbl, h),
+            daemon=True
+        ).start()
+
+def _send_session_report(sess_label, end_hour):
+    """Envoie le rapport de performance d'une session terminée."""
+    try:
+        # Signaux des 4 dernières heures (durée d'une session)
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M")
+        con = _conn(); cur = con.cursor()
+        cur.execute(
+            "SELECT pair,side,rr,g001,g1,l001,l1,mode FROM signals "
+            "WHERE sent_at >= ? ORDER BY sent_at",
+            (since,))
+        rows = cur.fetchall(); con.close()
+        if not rows:
+            return  # Pas de signaux cette session → pas de rapport
+        wins = sum(1 for r in rows if r[2] >= 2.5)
+        losses = len(rows) - wins
+        wr = round(wins / len(rows) * 100) if rows else 0
+        total_g001 = round(sum(r[3] for r in rows), 2)
+        total_g1   = round(sum(r[4] for r in rows), 2)
+        improv = sum(1 for r in rows if r[7] != "NORMAL")
+        perf = "🔥" if total_g1 > 500 else "💰" if total_g1 > 100 else "📊"
+        sep = "=" * 22
+        msg = (
+            "📊 <b>RAPPORT SESSION — {}</b> {}\n" + sep + "\n\n"
+            "⏱ Session terminée à {}h UTC\n\n"
+            "📡 <b>{}</b> signaux  ·  {} ✅  ·  {} ❌  ·  <b>{}%</b> WR\n"
+            "💵 Lot 0.01 : <b>+${}</b>\n"
+            "💰 Lot 1.00 : <b>+${}</b>\n"
+            "{}\n\n"
+        ).format(
+            sess_label, perf, end_hour,
+            len(rows), wins, losses, wr,
+            total_g001, total_g1,
+            "⚡ {} signal(s) improvisation".format(improv) if improv else ""
+        )
+        # Détail trades
+        sep2 = "=" * 22
+        for row in rows:
+            pair, side, rr, g001, g1, l001, l1, mode = row
+            ok  = rr >= 2.5
+            d   = "UP" if side == "BUY" else "DOWN"
+            tag = " IMPROV" if mode != "NORMAL" else ""
+            res = "+${:.0f}".format(g1) if ok else "-${:.0f}".format(l1)
+            msg += "{} {} {} {} {} RR 1:{} {}\n".format(
+                "OK" if ok else "SL", pair, tag, d, side, rr, res)
+        msg += "\n" + sep2 + "\n"
+        msg += "AlphaBot PRO · @leaderodg_bot"
+        tg_send(CHANNEL_ID, msg)
+        for puid in pro_users():
+            tg_send(puid, msg)
+            time.sleep(0.04)
+        log("INFO", clr("Rapport session {} envoyé ({} signaux)".format(
+            sess_label, len(rows)), "g"))
+    except Exception as e:
+        log("WARN", "session_report: {}".format(e))
 
 def scan_and_send():
     global _scan_run
@@ -1209,6 +1304,7 @@ def _scan_inner():
     now=datetime.now(timezone.utc).replace(tzinfo=None)
     scan_t=now.strftime("%H:%M"); ds=now.strftime("%Y-%m-%d"); hs=now.strftime("%H"); wd=now.weekday()
     sn,sm,sl_l,wknd=get_session()
+    sm = get_adaptive_score_min()  # Score adaptatif
     log("INFO",clr("Scan {} — {} — Score~{}".format(scan_t,sl_l,sm),"d"))
     news_ok,news_lbl=news_check()
     active=[m for m in MARKETS if not wknd or m.get("crypto",False)]
@@ -1274,6 +1370,8 @@ def _scan_inner():
         _scan_inner._lr=ds+hs; threading.Thread(target=relance_inactifs,daemon=True).start()
     threading.Thread(target=check_open_sigs,daemon=True).start()
     threading.Thread(target=ai_scan_cycle,daemon=True).start()
+    # Vérifier fin de session → rapport automatique
+    check_session_end_report()
 
 def ai_scan_cycle():
     try:
@@ -1961,7 +2059,9 @@ def _scan_and_send_inner():
     wday      = now_dt.weekday()
 
     sn, sm, sl, wknd = get_session()
-    log("INFO", clr("Scan {} — {} — Score ~{}  [{} marchés]".format(
+    # Score minimum adaptatif (session + régime marché)
+    sm = get_adaptive_score_min()
+    log("INFO", clr("Scan {} — {} — Score min:{}  [{} marchés]".format(
         scan_time, sl, sm, len(MARKETS)), "dim"))
     news_ok, news_lbl = news_check()
 
@@ -2128,34 +2228,66 @@ def calc_atr(c, p=14):
 
 
 def check_conf(c, b):
+    """
+    Score de confirmation ICT — 100 points maximum.
+
+    CONFIRMATIONS REQUISES (par ordre d'importance) :
+    ┌─────────────────────────────────────────┬──────┐
+    │ Bougie dans le sens du bias             │ +35  │
+    │ Corps > 50% du range (displacement)     │ +25  │
+    │ Rejet de wick (liquidité prise)          │ +20  │
+    │ Momentum (bougie précédente confirme)    │ +10  │
+    │ Bougie -2 confirme (série directionnelle)│ +5   │
+    │ Englobante (dépasse high/low précédent) │ +5   │
+    ├─────────────────────────────────────────┼──────┤
+    │ BONUS ICT v2 :                          │      │
+    │ CHoCH consécutifs (2+ = fort signal)    │ +5→15│
+    │ Equal High/Low touché (pool liquidité)  │ +10  │
+    │ OTE Zone 61.8-78.6% Fibonacci           │ +12  │
+    │ FVG (Fair Value Gap) en retest          │ +15  │
+    │ BOS pur avec momentum fort              │ +10  │
+    └─────────────────────────────────────────┴──────┘
+    Score minimum pour signal : 61-82 selon session
+    """
     if len(c) < 3: return 0
     c1 = c[-1]; c2 = c[-2]; c3 = c[-3]
     o = c1["o"]; cc = c1["c"]; h = c1["h"]; l = c1["l"]
     body = abs(cc - o); rng = h - l
     if rng == 0: return 0
     ratio = body / rng; s = 0
+
     if b == "BULLISH":
-        if cc > o:                       s += 35
-        if ratio > 0.5:                  s += 25
-        if min(o,cc) - l > body * 0.15: s += 20
-        if c2["c"] < cc:                 s += 10
-        if c3["c"] < c2["c"]:           s +=  5
-        if cc > c2["h"]:                 s +=  5
+        if cc > o:                        s += 35   # Direction correcte
+        if ratio > 0.5:                   s += 25   # Displacement fort
+        if min(o,cc) - l > body * 0.15:  s += 20   # Rejet bas (wick)
+        if c2["c"] < cc:                  s += 10   # Momentum M-1
+        if c3["c"] < c2["c"]:            s +=  5   # Série haussière
+        if cc > c2["h"]:                  s +=  5   # Englobante haussière
+        # Pénalités
+        if ratio < 0.3:                   s -= 10   # Corps trop faible
+        if h - max(o,cc) > body * 0.5:   s -=  5   # Wick haut trop long
     else:
-        if cc < o:                        s += 35
-        if ratio > 0.5:                   s += 25
-        if h - max(o,cc) > body * 0.15:  s += 20
-        if c2["c"] > cc:                  s += 10
-        if c3["c"] > c2["c"]:            s +=  5
-        if cc < c2["l"]:                  s +=  5
-    # Bonus ICT v2
+        if cc < o:                         s += 35
+        if ratio > 0.5:                    s += 25
+        if h - max(o,cc) > body * 0.15:   s += 20
+        if c2["c"] > cc:                   s += 10
+        if c3["c"] > c2["c"]:             s +=  5
+        if cc < c2["l"]:                   s +=  5
+        # Pénalités
+        if ratio < 0.3:                    s -= 10
+        if min(o,cc) - l > body * 0.5:    s -=  5
+
+    # ── Bonus ICT v2 ─────────────────────────────────────────
     choch_dir, choch_count = count_choch_sequence(c)
-    if choch_count >= 2 and choch_dir == b: s += min(15, choch_count * 7)
+    if choch_count >= 2 and choch_dir == b:
+        s += min(15, choch_count * 7)   # CHoCH x2 = +14, x3 = +15
+
     eqh, eql = detect_eqh_eql(c)
     lp = c[-1]["c"]
-    if b == "BEARISH" and eqh and abs(lp-eqh)/eqh < 0.005: s += 10
-    if b == "BULLISH" and eql and abs(lp-eql)/eql < 0.005: s += 10
-    return min(s, 110)
+    if b == "BEARISH" and eqh and abs(lp-eqh)/eqh < 0.005: s += 10  # EQH touché
+    if b == "BULLISH" and eql and abs(lp-eql)/eql < 0.005: s += 10  # EQL touché
+
+    return min(max(s, 0), 110)
 
 
 def count_choch_sequence(c):
@@ -2732,10 +2864,20 @@ def dispatch_callback(cb):
     elif data.startswith("adm_ban_") and uid == ADMIN_ID:
         try:
             t_uid = int(data.split("_")[2])
-            db_downgrade_pro(t_uid)
-            tg_send(ADMIN_ID, "\U0001f6d1 Utilisateur <code>{}</code> repassé en FREE.".format(t_uid))
+            plan,_,_ = get_pro_info(t_uid)
+            if plan == "PRO":
+                db_downgrade_pro(t_uid)
+                tg_send(t_uid, "🔒 <b>Accès PRO désactivé</b>\nPlan: FREE\n/pay pour revenir PRO.")
+                tg_send(ADMIN_ID, "✅ PRO → FREE : <code>{}</code>".format(t_uid),
+                    kb={"inline_keyboard":[[
+                        {"text":"🔄 Réactiver PRO","callback_data":"adm_pro_{}".format(t_uid)}
+                    ]]})
+            else:
+                # Refuser paiement
+                db_run("UPDATE payments SET status=\'REJECTED\' WHERE user_id=? AND status=\'PENDING\'",(t_uid,))
+                tg_send(ADMIN_ID, "❌ Paiement refusé : <code>{}</code>".format(t_uid))
         except Exception as ex:
-            tg_send(ADMIN_ID, "\u274c Erreur : {}".format(ex))
+            tg_send(ADMIN_ID, "❌ Erreur : {}".format(ex))
 
     elif data == "adm_panel" and uid == ADMIN_ID:
         threading.Thread(target=send_admin_panel, args=(uid,), daemon=True).start()
@@ -3050,50 +3192,90 @@ def handle_activate(uid, target):
     if not _admin_only(uid): return
     if not target:
         tg_send(uid,
-            "\U0001f6e0 <b>ADMIN v8.5</b>\n\n"
-            "/activate ID    \u2192 Toggle PRO\u21d4FREE\n"
-            "/degrade ID     \u2192 Forcer FREE\n"
-            "/testfree       \u2192 Simuler vue FREE\n"
-            "/testpro        \u2192 Retour vue PRO\n"
-            "/scan           \u2192 Forcer scan immédiat\n"
-            "/debug          \u2192 Raisons dernier scan\n"
-            "/resetcount [ID]\u2192 Reset compteur signaux\n"
-            "/monstatus      \u2192 Statut admin complet\n"
-            "/stats          \u2192 Stats + paiements\n"
-            "/membres [n]    \u2192 Liste membres paginée")
+            "🛠 <b>COMMANDES ADMIN</b>\n\n"
+            "/activate ID    → Toggle PRO ↔ FREE\n"
+            "/activate @user → Par username\n"
+            "/degrade ID     → Forcer FREE\n"
+            "/testfree       → Simuler vue FREE\n"
+            "/testpro        → Retour vue PRO\n"
+            "/scan           → Forcer scan immédiat\n"
+            "/debug          → Raisons dernier scan\n"
+            "/resetcount [ID]→ Reset compteur signaux\n"
+            "/monstatus      → Statut admin complet\n"
+            "/stats          → Stats + paiements\n"
+            "/membres [n]    → Liste membres paginée\n\n"
+            "<b>Toggle rapide ↓</b>",
+            kb={"inline_keyboard": [
+                [{"text": "📋 Liste membres", "callback_data": "adm_membres_1"},
+                 {"text": "📊 Stats",          "callback_data": "adm_stats"}],
+                [{"text": "💰 Paiements",       "callback_data": "adm_payments"}],
+            ]})
         return
     try:
         t_uid = int(target) if target.lstrip("@").isdigit() else db_find_by_username(target)
         if not t_uid:
-            tg_send(uid, "\u274c Utilisateur introuvable."); return
+            tg_send(uid, "❌ Utilisateur introuvable : {}".format(target)); return
         plan, exp, src = db_get_pro_info(t_uid)
         con = _conn(); cur = con.cursor()
         cur.execute("SELECT username FROM users WHERE user_id=?", (t_uid,))
         row = cur.fetchone(); con.close()
-        uc  = "@" + (row[0] if row and row[0] else str(t_uid))
+        uc = "@" + (row[0] if row and row[0] else str(t_uid))
         if plan == "PRO":
+            # ── DÉSACTIVER PRO ───────────────────────────────────
             db_downgrade_pro(t_uid)
-            tg_send(t_uid, "\U0001f512 PRO désactivé. Plan : FREE.\n/pay pour revenir PRO.")
-            tg_send(uid, "\u2705 {} \u2192 FREE  <code>{}</code>".format(uc, t_uid))
+            tg_send(t_uid,
+                "🔒 <b>Accès PRO désactivé</b>\n\n"
+                "Ton plan est maintenant : <b>FREE</b>\n"
+                "Limite : {} signaux/jour\n\n"
+                "Pour revenir PRO : /pay".format(FREE_LIMIT))
+            tg_send(uid,
+                "✅ PRO → FREE\n"
+                "{} <code>{}</code>\n\n"
+                "Plan actuel : <b>FREE</b>".format(uc, t_uid),
+                kb={"inline_keyboard": [[
+                    {"text": "🔄 Réactiver PRO", "callback_data": "adm_pro_{}".format(t_uid)},
+                ]]})
+            log("INFO", clr("Admin: {} {} → FREE".format(uc, t_uid), "y"))
         else:
+            # ── ACTIVER PRO ─────────────────────────────────────
             db_activate_pro(t_uid, "ADMIN", days=None)
             tg_send(t_uid,
-                "\U0001f389 <b>PRO activé !</b>\n\n"
-                "\u2705 Max {} signaux/j\n\u2705 24 paires + crypto week-end\n"
-                "\u2705 Rapports inclus\n\U0001f680 Bienvenue !".format(PRO_LIMIT))
-            tg_send(uid, "\u2705 PRO : {} <code>{}</code>  À VIE".format(uc, t_uid))
+                "🎉 <b>PRO activé !</b>\n\n"
+                "✅ Max {} signaux/jour\n"
+                "✅ Tous les marchés + crypto week-end\n"
+                "✅ Rapports quotidiens + hebdo\n"
+                "⚡ Mode Improvisation inclus\n"
+                "🤖 Agent IA Binance inclus\n\n"
+                "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
+            tg_send(uid,
+                "✅ FREE → PRO\n"
+                "{} <code>{}</code>  À VIE\n\n"
+                "Plan actuel : <b>PRO ✅</b>".format(uc, t_uid),
+                kb={"inline_keyboard": [[
+                    {"text": "🔒 Désactiver PRO", "callback_data": "adm_ban_{}".format(t_uid)},
+                ]]})
+            log("INFO", clr("Admin: {} {} → PRO".format(uc, t_uid), "g"))
     except Exception as ex:
-        tg_send(uid, "\u274c {}".format(ex))
+        tg_send(uid, "❌ Erreur : {}".format(ex))
 
 
 def handle_admin_broadcast_start(uid, target):
     nb = len(db_get_pro_users()) + len(db_get_free_users()) if target == "ALL" else len(db_get_pro_users())
+    # Enregistrer l'état en attente de message
+    _broadcast_pending[uid] = {"target": target, "step": "waiting"}
+    _bcast_pending[uid] = {"target": target, "step": "waiting"}
     tg_send(uid,
         "✉️ <b>BROADCAST → {}</b>\n\n"
-        "Envoie maintenant le message à diffuser à <b>{} membres</b>.\n\n"
-        "💡 Tu peux utiliser du HTML : <b>gras</b>, <i>italique</i>, <code>code</code>\n\n"
+        "📝 <b>Tape maintenant ton message</b> et envoie-le.\n\n"
+        "👥 Sera envoyé à <b>{} membres</b>\n\n"
+        "💡 HTML supporté :\n"
+        "  <code>&lt;b&gt;gras&lt;/b&gt;</code>\n"
+        "  <code>&lt;i&gt;italique&lt;/i&gt;</code>\n"
+        "  <code>&lt;code&gt;code&lt;/code&gt;</code>\n\n"
         "/annuler pour annuler.".format(target, nb),
-        kb={"inline_keyboard": [[{"text": "❌ Annuler", "callback_data": "adm_panel"}]]})
+        kb={"inline_keyboard": [[
+            {"text": "❌ Annuler", "callback_data": "adm_panel"}
+        ]]})
 
 
 def handle_broadcast_message(uid, text):
@@ -3585,9 +3767,50 @@ def print_banner():
 
 
 def score_min_for_market(m, base, atr_ratio):
+    """Score minimum adaptatif selon la qualité de la session et la volatilité."""
     vol_adj = (m.get("vol", 3) - 3) * 2
     atr_adj = min(4, int(atr_ratio * 5))
     return base + vol_adj + atr_adj
+
+def get_adaptive_score_min():
+    """
+    Score minimum intelligent :
+    - Kill Zone Londres/NY     → score min BAISSÉ  (meilleure session)
+    - Session hors marché/nuit → score min MONTÉ   (moins de setups)
+    - Week-end                 → score min MONTÉ   (crypto only, volatilité)
+    - Régime VOLATILE/CRISIS   → score min MONTÉ   (risque élevé)
+    - Régime TRENDING          → score min BAISSÉ  (tendance claire)
+    """
+    sn, sm, sl, wknd = get_session()
+    reg  = AI_REG.get("regime", "RANGING")
+    base = sm  # score de base de la session
+
+    # Ajustement selon la qualité de la session
+    session_adj = {
+        "LONDON_KZ": -5,   # Kill Zone = meilleure probabilité
+        "OVERLAP":   -3,   # London+NY = très liquide
+        "NY_KZ":     -5,   # Kill Zone NY
+        "NY":        -2,   # NY normal
+        "LONDON":    -1,   # Londres normal
+        "ASIAN":     +5,   # Asie = moins fiable
+        "OFF":       +10,  # Hors session = éviter
+        "WEEKEND":   +8,   # Week-end = volatile
+    }.get(sn, 0)
+
+    # Ajustement selon le régime de marché
+    regime_adj = {
+        "TRENDING_BULL": -3,  # Tendance claire → plus facile
+        "TRENDING_BEAR": -3,
+        "ACCUMULATION":  -1,
+        "RANGING":       +2,  # Range → plus de faux signaux
+        "VOLATILE":      +8,  # Volatile → exiger plus de confirmations
+        "CRISIS":        +20, # Crise → quasi stop
+    }.get(reg, 0)
+
+    final = base + session_adj + regime_adj
+    log("INFO", clr("Score min adaptatif: {} (base:{} sess:{:+d} regime:{:+d})".format(
+        final, base, session_adj, regime_adj), "d"))
+    return max(60, min(95, final))
 
 
 
@@ -3959,7 +4182,7 @@ def send_affilie(uid, uname):
 # ══════════════════════════════════════════════════════
 #  ADMIN COMPLET
 # ══════════════════════════════════════════════════════
-_bcast_pending = {}   # uid → {"target":"ALL"|"PRO","step":"waiting"}
+_bcast_pending = _broadcast_pending  # même dict, deux noms
 STK_ROCKET = "CAACAgIAAxkBAAIBjGWbNfNMiEkgPZrxgWMVBH1ycfP7AAIbAQACB8OhCsYm5NOoMByuNgQ"
 
 def kb_admin_full():
@@ -4352,10 +4575,111 @@ def dispatch_cb(cb):
     elif data.startswith("adm_ban_") and uid==ADMIN_ID:
         t=int(data.split("_")[2]); db_run("UPDATE payments SET status='REJECTED' WHERE user_id=? AND status='PENDING'",(t,)); tg_send(uid,"❌ Refusé: <code>{}</code>".format(t))
 
+def handle_new_group_member(uid, uname, first_name):
+    """
+    Nouveau membre rejoint le groupe :
+    1. Enregistrement en base
+    2. Message de bienvenue + essai PRO
+    3. Invitation groupe VIP
+    4. Notification admin avec ID + username
+    """
+    try:
+        db_register(uid, uname, tg_fn=tg_send)
+        name = "@" + uname if uname else first_name or "Trader"
+
+        # ── Message de bienvenue ────────────────────────────────
+        tg_send(uid,
+            "👋 <b>Bienvenue {} !</b>\n\n"
+            "🤖 <b>AlphaBot PRO</b> — Signaux trading automatiques\n\n"
+            "✅ {} signaux/jour GRATUITS\n"
+            "📊 Forex · Or · BTC · Indices · Pétrole\n"
+            "🎯 Entrée + TP + SL automatiques\n"
+            "⚡ Mode Improvisation actif\n\n"
+            "🎁 <b>Essai PRO {} jours offert !</b>\n\n"
+            "👉 Clique /start pour commencer".format(
+                name, FREE_LIMIT, TRIAL_DAYS),
+            kb={{"inline_keyboard": [[
+                {{"text": "🚀 Démarrer", "callback_data": "start"}},
+                {{"text": "💎 Voir PRO",  "callback_data": "pro"}},
+            ]]}})
+
+        # ── Recommandation groupe VIP ───────────────────────────
+        time.sleep(2)
+        try:
+            vip_link = "https://t.me/+{}".format(
+                VIP_CH.lstrip("-100") if VIP_CH.startswith("-100") else VIP_CH.lstrip("-"))
+        except:
+            vip_link = "https://t.me/leaderOdg"
+        tg_send(uid,
+            "🏆 <b>GROUPE VIP AlphaBot</b>\n\n"
+            "Rejoins notre groupe VIP pour :\n"
+            "✅ Signaux en temps réel\n"
+            "✅ Analyses de marché en direct\n"
+            "✅ Discussion avec @leaderOdg\n\n"
+            "❓ Questions sur la méthode ICT/SMC ?\n"
+            "👉 Contacte directement @leaderOdg\n\n"
+            "📩 Demande d'accès au groupe VIP :",
+            kb={{"inline_keyboard": [[
+                {{"text": "👑 Rejoindre le groupe VIP",
+                  "url": "https://t.me/leaderOdg"}},
+            ]]}})
+
+        # ── Notification admin ──────────────────────────────────
+        total, pro, _, _, _ = global_stats()
+        tg_send(ADMIN_ID,
+            "👤 <b>NOUVEAU MEMBRE</b>\n\n"
+            "🆔 ID     : <code>{}</code>\n"
+            "👤 Username: {}\n"
+            "📋 Prénom  : {}\n\n"
+            "👥 Total membres : <b>{}</b>  (PRO: {})\n\n"
+            "Actions rapides ↓".format(
+                uid,
+                "@" + uname if uname else "—",
+                first_name or "—",
+                total, pro),
+            kb={{"inline_keyboard": [[
+                {{"text": "💠 Activer PRO",
+                  "callback_data": "adm_pro_{}".format(uid)}},
+                {{"text": "💬 Contacter",
+                  "url": "tg://user?id={}".format(uid)}},
+            ]]}})
+
+        log("INFO", clr("Nouveau membre: @{} ID:{} — notif admin envoyée".format(
+            uname or "?", uid), "g"))
+    except Exception as e:
+        log("WARN", "handle_new_group_member: {}".format(e))
+
 def process_update(upd):
     try:
+        # ── Nouveau membre dans le groupe ────────────────────────
+        if "chat_member" in upd:
+            cm = upd["chat_member"]
+            new_m = cm.get("new_chat_member", {})
+            status = new_m.get("status", "")
+            user = new_m.get("user", {})
+            if status == "member" and not user.get("is_bot"):
+                uid   = user["id"]
+                uname = user.get("username", "")
+                fname = user.get("first_name", "")
+                threading.Thread(target=handle_new_group_member,
+                    args=(uid, uname, fname), daemon=True).start()
+            return
+
+        # ── Nouveau membre via message system (ancienne API) ─────
         if "message" in upd:
-            msg=upd["message"]; uid=msg["from"]["id"]; uname=msg.get("from",{}).get("username",""); txt=msg.get("text","")
+            msg = upd["message"]
+            new_members = msg.get("new_chat_members", [])
+            if new_members:
+                for user in new_members:
+                    if not user.get("is_bot"):
+                        uid   = user["id"]
+                        uname = user.get("username", "")
+                        fname = user.get("first_name", "")
+                        threading.Thread(target=handle_new_group_member,
+                            args=(uid, uname, fname), daemon=True).start()
+                return
+
+            uid=msg["from"]["id"]; uname=msg.get("from",{}).get("username",""); txt=msg.get("text","")
             if txt:
                 def _h(uid=uid,uname=uname,txt=txt):
                     db_run("UPDATE users SET last_seen=? WHERE user_id=?",(datetime.now().isoformat(),uid))
@@ -4383,17 +4707,21 @@ def startup():
     threading.Thread(target=refresh_exch,daemon=True).start()
     threading.Thread(target=refresh_ai,daemon=True).start()
     sn,sm,sl_l,wknd=get_session(); ch=chal_get()
-    ok=tg_send(ADMIN_ID,"🤖 <b>AlphaBot PRO v9 — DÉMARRÉ!</b>\n\n"
-        "⚡ <b>Mode Improvisation actif</b>\n"
-        "🕐 {}  🎯 Score min: {}\n{}"
-        "🌍 Régime IA: <b>{}</b>\n"
-        "🏆 Challenge: <b>{:.4f}$</b> → {:.0f}$\n"
-        "📡 FREE {}/j  ·  PRO {}/j\n"
-        "💰 Paiement USDT auto\n\n"
-        "🛠 /admin".format(sl_l,sm,
-            "🌍 <b>Week-end: crypto uniquement!</b>\n" if wknd else "",
-            AI_REG.get("regime","Init"),ch["balance"],ch["start_bal"]*100,FREE_LIMIT,PRO_LIMIT))
-    if not ok.get("ok"): log("ERR",clr("Telegram échoué — vérifie BOT_TOKEN","red")); return False
+    # Message de démarrage en arrière-plan — ne bloque pas le serveur HTTP
+    def _notify():
+        try:
+            tg_send(ADMIN_ID,"🤖 <b>AlphaBot PRO v9 — DÉMARRÉ!</b>\n\n"
+                "⚡ <b>Mode Improvisation actif</b>\n"
+                "🕐 {}  🎯 Score min: {}\n{}"
+                "🌍 Régime IA: <b>{}</b>\n"
+                "🏆 Challenge: <b>{:.4f}$</b> → {:.0f}$\n"
+                "📡 FREE {}/j  ·  PRO {}/j\n"
+                "💰 Paiement USDT auto\n\n"
+                "🛠 /admin".format(sl_l,sm,
+                    "🌍 <b>Week-end: crypto uniquement!</b>\n" if wknd else "",
+                    AI_REG.get("regime","Init"),ch["balance"],ch["start_bal"]*100,FREE_LIMIT,PRO_LIMIT))
+        except: pass
+    threading.Thread(target=_notify,daemon=True).start()
     log("INFO",clr("AlphaBot v9 actif","b","g")); return True
 
 def make_wh():
@@ -4412,14 +4740,28 @@ def make_wh():
     return WH
 
 def main():
-    if not startup(): return
-    port=int(os.environ.get("PORT",10000)); render=os.environ.get("RENDER_EXTERNAL_URL","")
+    port = int(os.environ.get("PORT", 10000))
+    render = os.environ.get("RENDER_EXTERNAL_URL", "")
     if render:
-        tg_req("deleteWebhook",{"drop_pending_updates":"true"}); time.sleep(2)
-        r=tg_req("setWebhook",{"url":"{}/webhook".format(render.rstrip("/")),"drop_pending_updates":"true","max_connections":10})
-        if r.get("ok"): log("INFO",clr("Webhook OK","b","g"))
-        else: log("ERR",clr("Webhook échoué: {}".format(r),"red"))
-        server=HTTPServer(("0.0.0.0",port),make_wh()); state={"ls":0,"la":0,"lc":0}
+        # ══ PRIORITÉ ABSOLUE : ouvrir le port HTTP en premier ══
+        # Render exige un port ouvert dans les 60 secondes
+        server = HTTPServer(("0.0.0.0", port), make_wh())
+        log("INFO", clr("Port {} ouvert — Render OK".format(port), "b", "g"))
+        # Tout le reste en arrière-plan
+        def _init_bg():
+            startup()  # db_init, register admin, notify Telegram
+            tg_req("deleteWebhook", {"drop_pending_updates": "true"})
+            time.sleep(1)
+            r = tg_req("setWebhook", {
+                "url": "{}/webhook".format(render.rstrip("/")),
+                "drop_pending_updates": "true",
+                "max_connections": 10,
+                "allowed_updates": '["message","callback_query","chat_member","my_chat_member"]'
+            })
+            if r.get("ok"): log("INFO", clr("Webhook OK", "b", "g"))
+            else: log("ERR", clr("Webhook échoué: {}".format(r), "red"))
+        threading.Thread(target=_init_bg, daemon=True).start()
+        state = {"ls": 0, "la": 0, "lc": 0}
         def _loop():
             while True:
                 try:
