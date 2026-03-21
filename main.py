@@ -161,7 +161,7 @@ def tg_sticker(cid, sid): tg_req("sendSticker",{"chat_id":str(cid),"sticker":sid
 # ══════════════════════════════════════════════════════
 #  BASE DE DONNÉES
 # ══════════════════════════════════════════════════════
-_dbl = threading.Lock()
+_dbl = threading.RLock()  # RLock: réentrant, évite deadlock db_register→db_pro
 def _conn():
     c = sqlite3.connect(DB_FILE, check_same_thread=False)
     c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=NORMAL")
@@ -368,10 +368,19 @@ def inactive_users(days=3):
     return db_all("SELECT user_id,username FROM users WHERE plan='FREE' AND (last_seen<? OR last_seen IS NULL) AND joined<?",(cutoff,cutoff))
 
 def chal_get():
-    r=db_one("SELECT balance,start_bal,today_pnl,today_w,today_l,best_rr,peak,am_cycle,w_streak,l_streak,day_open,day_start FROM challenge WHERE id=1")
-    if not r: return {"balance":CHALLENGE_START,"start_bal":CHALLENGE_START,"today_pnl":0,"today_w":0,"today_l":0,"best_rr":0,"peak":CHALLENGE_START,"am_cycle":0,"w_streak":0,"l_streak":0,"day_open":CHALLENGE_START,"day_start":""}
-    k=["balance","start_bal","today_pnl","today_w","today_l","best_rr","peak","am_cycle","w_streak","l_streak","day_open","day_start"]
-    return dict(zip(k,r))
+    _def = {"balance":CHALLENGE_START,"start_bal":CHALLENGE_START,"today_pnl":0,
+            "today_w":0,"today_l":0,"best_rr":0,"peak":CHALLENGE_START,
+            "am_cycle":0,"w_streak":0,"l_streak":0,"day_open":CHALLENGE_START,"day_start":""}
+    try:
+        r = db_one("SELECT balance,start_bal,today_pnl,today_w,today_l,best_rr,"
+                   "peak,am_cycle,w_streak,l_streak,day_open,day_start FROM challenge WHERE id=1")
+    except Exception:
+        return _def
+    if not r:
+        return _def
+    k = ["balance","start_bal","today_pnl","today_w","today_l","best_rr",
+         "peak","am_cycle","w_streak","l_streak","day_open","day_start"]
+    return dict(zip(k, r))
 
 def chal_save(c):
     today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1082,61 +1091,70 @@ MODE_LABELS = {
     "OB":"Order Block","LIQ":"Liquidity Sweep",
 }
 
-def fmt_pro(s,news,sl_label):
-    se="🟢" if s["side"]=="BUY" else "🔴"; sf="ACHAT" if s["side"]=="BUY" else "VENTE"
-    emo=CAT_EMO.get(s["cat"],"📊"); mode_lbl=MODE_LABELS.get(s["mode"],"?")
-    is_improv=s.get("improv",False)
-    improv_warn="\n⚡ <b>Mode Improvisation</b> — Setup allégé (risque 50%)" if is_improv else ""
-    bar="█"*(s["score"]//10)+"░"*(10-s["score"]//10)
-    return (
-        "{se} <b>SIGNAL PRO {sf} — {name}</b>  {emo}\n"+"═"*22+"\n"
-        "🕐 {time} UTC  ·  {sl_label}\n"
-        "{improv_warn}\n\n"
-        "🎯 <b>NIVEAUX</b>\n"
-        "  Entrée : <code>{entry}</code>\n"
-        "  TP     : <code>{tp}</code>  ✅\n"
-        "  SL     : <code>{sl}</code>  ❌\n"
-        "  RR     : <b>1:{rr}</b>\n\n"
-        "💵 <b>GAINS ESTIMÉS</b>\n"
-        "  Lot 0.01 → <b>+${g001}</b>  /  -${l001}\n"
-        "  Lot 1.00 → <b>+${g1}</b>  /  -${l1}  💰\n\n"
-        "🧠 <b>ANALYSE</b>\n"
-        "  Tendance : <b>{bias}</b>  ({btype})\n"
-        "  Mode     : <b>{mode}</b>\n"
-        "  Score    : <b>{score}/100</b>  [{bar}]\n"
-        "  {badges}\n\n"
-        "📋 News: {news}  ·  Spread: {sp_s}\n"+"═"*22+"\n"
-        "⚠️ Risk 1% max  ·  Not financial advice\n"
-        "🤖 AlphaBot PRO  ·  @leaderodg_bot"
-    ).format(se=se,sf=sf,name=s["name"],emo=emo,time=s["time"],sl_label=sl_label,
-             improv_warn=improv_warn,entry=s["entry"],tp=s["tp"],sl=s["sl"],rr=s["rr"],
-             g001=s["g001"],l001=s["l001"],g1=s["g1"],l1=s["l1"],
-             bias=s["bias"],btype=s["btype"],mode=mode_lbl,score=s["score"],bar=bar,
-             badges=s.get("badges","—"),
-             news="✅ OK" if "✅" in news else "⚠️ Actif",
-             sp_s="✅ OK" if s["sp"]<3 else "⚠️ Large")
+def fmt_pro(s, news, sl_label):
+    se         = "🟢" if s["side"] == "BUY" else "🔴"
+    sf         = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo        = CAT_EMO.get(s["cat"], "📊")
+    mode_lbl   = MODE_LABELS.get(s["mode"], "?")
+    is_improv  = s.get("improv", False)
+    improv_warn = "\n⚡ <b>Mode Improvisation</b> — Setup allégé (risque 50%)" if is_improv else ""
+    bar        = "█" * (s["score"] // 10) + "░" * (10 - s["score"] // 10)
+    sep        = "═" * 22
+    news_lbl   = "✅ OK" if "✅" in news else "⚠️ Actif"
+    sp_s       = "✅ OK" if s["sp"] < 3 else "⚠️ Large"
+    lines = [
+        f'{se} <b>SIGNAL PRO {sf} — {s["name"]}</b>  {emo}',
+        sep,
+        f'🕐 {s["time"]} UTC  ·  {sl_label}',
+        improv_warn,
+        "",
+        "🎯 <b>NIVEAUX</b>",
+        f'  Entrée : <code>{s["entry"]}</code>',
+        f'  TP     : <code>{s["tp"]}</code>  ✅',
+        f'  SL     : <code>{s["sl"]}</code>  ❌',
+        f'  RR     : <b>1:{s["rr"]}</b>',
+        "",
+        "💵 <b>GAINS ESTIMÉS</b>",
+        f'  Lot 0.01 → <b>+${s["g001"]}</b>  /  -${s["l001"]}',
+        f'  Lot 1.00 → <b>+${s["g1"]}</b>  /  -${s["l1"]}  💰',
+        "",
+        "🧠 <b>ANALYSE</b>",
+        f'  Tendance : <b>{s["bias"]}</b>  ({s["btype"]})',
+        f'  Mode     : <b>{mode_lbl}</b>',
+        f'  Score    : <b>{s["score"]}/100</b>  [{bar}]',
+        f'  {s.get("badges", "—")}',
+        "",
+        f'📋 News: {news_lbl}  ·  Spread: {sp_s}',
+        sep,
+        "⚠️ Risk 1% max  ·  Not financial advice",
+        "🤖 AlphaBot PRO  ·  @leaderodg_bot",
+    ]
+    return "\n".join(lines)
 
 def fmt_free(s, news, sl_label):
-    se        = "🟢" if s["side"] == "BUY" else "🔴"
-    sf        = "ACHAT" if s["side"] == "BUY" else "VENTE"
-    emo       = CAT_EMO.get(s["cat"], "📊")
+    se         = "🟢" if s["side"] == "BUY" else "🔴"
+    sf         = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo        = CAT_EMO.get(s["cat"], "📊")
     improv_tag = " ⚡" if s.get("improv") else ""
-    sep       = "═" * 22
-    return (
-        "{se} <b>SIGNAL {sf} — {name}</b>  {emo}{improv_tag}\n" + sep + "\n"
-        "📍 Entrée : <code>{entry}</code>\n"
-        "✅ TP     : <code>{tp}</code>\n"
-        "❌ SL     : <code>{sl}</code>\n"
-        "📐 RR : <b>1:{rr}</b>  ·  Score : <b>{score}/100</b>\n\n"
-        "💵 Lot 0.01 : <b>+${g001}</b>\n"
-        "💰 Lot 1.00 : <b>+${g1}</b>\n\n"
-        "🔒 Analyse complète → PRO {p}$ USDT\n" + sep + "\n"
-        "🤖 AlphaBot  ·  @leaderodg_bot"
-    ).format(
-        se=se, sf=sf, name=s["name"], emo=emo, improv_tag=improv_tag,
-        entry=s["entry"], tp=s["tp"], sl=s["sl"], rr=s["rr"], score=s["score"],
-        g001=s["g001"], g1=s["g1"], p=PRO_PRICE
-    )
+    sep        = "═" * 22
+    # NOTE: on n'utilise PAS .format() avec ${xxx} → IndexError Python 3.14
+    # On construit ligne par ligne avec f-strings
+    lines = [
+        f"{se} <b>SIGNAL {sf} — {s['name']}</b>  {emo}{improv_tag}",
+        sep,
+        f"📍 Entrée : <code>{s['entry']}</code>",
+        f"✅ TP     : <code>{s['tp']}</code>",
+        f"❌ SL     : <code>{s['sl']}</code>",
+        f"📐 RR : <b>1:{s['rr']}</b>  ·  Score : <b>{s['score']}/100</b>",
+        "",
+        f"💵 Lot 0.01 : <b>+${s['g001']}</b>",
+        f"💰 Lot 1.00 : <b>+${s['g1']}</b>",
+        "",
+        f"🔒 Analyse complète → PRO {PRO_PRICE}$ USDT",
+        sep,
+        "🤖 AlphaBot  ·  @leaderodg_bot",
+    ]
+    return "\n".join(lines)
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     st=daily_stats(); ch=chal_get(); reg=AI_REG
