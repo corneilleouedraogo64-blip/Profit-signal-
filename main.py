@@ -4049,7 +4049,7 @@ def send_welcome(uid, uname, ref_by=0):
         "🎁 Essai PRO {} jours GRATUIT !\n"
         "💠 PRO = max {}/j  ·  🤝 {} filleuls = {} mois PRO\n\n"
         "📖 /guide ou choisis ci-dessous ↓".format(TRIAL_DAYS,PRO_LIMIT,REF_TARGET,REF_MONTHS),
-        kb=kb_reply())
+        kb=kb_reply())    # ← clavier physique persistant
 
 def send_signals_info(uid):
     p = is_pro(uid); st = daily_stats(); rows = st["rows"]
@@ -4454,62 +4454,127 @@ def handle_bcast_msg(uid, text):
 
 _test_mode_full = ""  # admin test mode FREE/PRO
 
-def dispatch(uid,uname,txt):
-    parts=txt.strip().split(); cmd=parts[0].lower().lstrip("/").split("@")[0] if parts else ""; arg=" ".join(parts[1:]) if len(parts)>1 else ""
-    if cmd in ("start","menu","aide","help"):
-        ref=int(arg) if arg.isdigit() else 0; db_register(uid,uname,ref,tg_fn=tg_send); send_start(uid,uname)
-    elif cmd=="admin": send_admin_full(uid)
-    elif cmd=="pay": send_pay(uid)
-    elif cmd in ("ref","parrainage"): send_ref(uid,uname)
-    elif cmd=="broker": send_broker(uid)
-    elif cmd=="guide": send_guide(uid)
-    elif cmd in ("status","monstatus","compte"): send_account(uid,uname)
-    elif cmd in ("rapports","stats","perf"): send_rapports(uid)
-    elif cmd=="challenge": send_challenge(uid)
-    elif cmd=="scan" and uid==ADMIN_ID: tg_send(uid,"📡 Scan lancé..."); threading.Thread(target=scan_and_send,daemon=True).start()
-    elif cmd in ("annuler",) and uid==ADMIN_ID: _bcast_pending.pop(uid,None); tg_send(uid,"❌ Broadcast annulé.",kb=kb_reply())
-    elif uid==ADMIN_ID and txt and not txt.startswith("/") and handle_bcast_msg(uid,txt): pass
-    elif cmd=="monstatus" and uid==ADMIN_ID: threading.Thread(target=handle_monstatus_full,args=(uid,),daemon=True).start()
-    elif cmd=="marches": threading.Thread(target=handle_marches_full,args=(uid,),daemon=True).start()
-    elif cmd=="resetcount": handle_resetcount(uid,arg)
-    elif cmd=="stats" and uid==ADMIN_ID: threading.Thread(target=send_admin_stats_full,args=(uid,),daemon=True).start()
-    elif cmd in ("pay","pro"): db_register(uid,uname); threading.Thread(target=send_pro_page if cmd=="pro" else send_pay,args=(uid,),daemon=True).start()
-    elif cmd=="support": tg_send(uid,"📩 <b>Support</b>\nID: <code>{}</code>\n👉 @leaderOdg".format(uid))
-    elif txt.startswith("/txhash"):
-        parts=txt.split()
-        if len(parts)>=2: db_register(uid,uname); threading.Thread(target=lambda:handle_proof(uid,uname,tx=parts[1]),daemon=True).start()
-        else: tg_send(uid,"Usage:\n<code>/txhash COLLE_TON_HASH</code>")
-    elif cmd=="debug" and uid==ADMIN_ID:
-        if not _last_results: tg_send(uid,"Aucun scan."); return
-        lines=["🔍 <b>DEBUG DERNIER SCAN</b>",""]
-        for r in _last_results:
-            tag=" ⚡" if r.get("improv") else ""; icon="🟢" if r["found"] else "⚪"
-            lines.append("{} <b>{}</b>{}  {}".format(icon,r["name"],tag,r.get("reason","✓") if not r["found"] else "Signal"))
-        tg_send(uid,"\n".join(lines))
-    elif cmd=="activate" and uid==ADMIN_ID:
-        if not arg: tg_send(uid,"Usage: /activate ID"); return
-        try:
-            t=int(arg) if arg.lstrip("@").isdigit() else find_user(arg)
-            if not t: tg_send(uid,"❌ Introuvable."); return
-            p,_,_=get_pro_info(t)
-            if p=="PRO": db_free(t); tg_send(t,"🔒 PRO désactivé."); tg_send(uid,"✅ {} → FREE".format(t))
-            else: db_pro(t,"ADMIN",days=None); tg_send(t,"🎉 <b>PRO activé!</b>\n✅ {} signaux/j\n⚡ Mode Improvisation inclus!".format(PRO_LIMIT)); tg_send(uid,"✅ PRO: <code>{}</code>".format(t))
-        except Exception as e: tg_send(uid,"❌ {}".format(e))
-    elif cmd=="degrade" and uid==ADMIN_ID:
-        if not arg: tg_send(uid,"Usage: /degrade ID"); return
-        try:
-            t=int(arg) if arg.lstrip("@").isdigit() else find_user(arg)
-            if not t: tg_send(uid,"❌ Introuvable."); return
-            db_free(t); tg_send(t,"🔒 PRO désactivé."); tg_send(uid,"✅ FREE: <code>{}</code>".format(t))
-        except Exception as e: tg_send(uid,"❌ {}".format(e))
-    elif cmd=="membres" and uid==ADMIN_ID:
-        page=int(arg) if arg.isdigit() else 1; per=10
-        rows=db_all("SELECT user_id,username,plan,joined FROM users ORDER BY joined DESC LIMIT ? OFFSET ?",(per,(page-1)*per))
-        total=db_one("SELECT COUNT(*) FROM users")[0]
-        lines=["👥 <b>MEMBRES — Page {}</b>".format(page),""]
-        for u2,un,plan,joined in rows: lines.append("  {} @{}  <code>{}</code>  {}".format("💎" if plan=="PRO" else "⚪",un or "?",u2,plan))
-        lines+=["","Total: {}".format(total)]; tg_send(uid,"\n".join(lines))
-    else: db_register(uid,uname); tg_send(uid,"🤖 Choisis une option :",kb=kb_reply())
+def dispatch(uid, uname, txt):
+    """Dispatcher principal — gère boutons clavier ET commandes slash."""
+    t = txt.strip()
+    db_register(uid, uname)
+    db_run("UPDATE users SET last_seen=? WHERE user_id=?",
+           (datetime.now().isoformat(), uid))
+
+    # ── 1. BOUTONS DU CLAVIER PHYSIQUE (texte exact) ─────────────
+    if t == "📡 Mes Signaux":
+        threading.Thread(target=send_signals_info, args=(uid,), daemon=True).start(); return
+    if t == "📊 Mon Compte":
+        forced = _test_mode if uid == ADMIN_ID and _test_mode else None
+        threading.Thread(target=send_account, args=(uid, uname, forced), daemon=True).start(); return
+    if t == "💰 Devenir PRO":
+        threading.Thread(target=send_pro_page, args=(uid,), daemon=True).start(); return
+    if t == "🤝 Parrainage":
+        threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start(); return
+    if t == "💸 Mes Gains":
+        threading.Thread(target=send_mes_gains, args=(uid,), daemon=True).start(); return
+    if t in ("📖 Guide ICT", "📖 Guide AlphaBot"):
+        threading.Thread(target=send_guide, args=(uid,), daemon=True).start(); return
+    if t == "📈 Rapports":
+        threading.Thread(target=send_rapports, args=(uid,), daemon=True).start(); return
+    if t == "🏦 Broker Exness":
+        threading.Thread(target=send_broker, args=(uid,), daemon=True).start(); return
+    # Anciens boutons (rétrocompatibilité)
+    if t in ("📩 Mes Signaux", "🛰 Mes Signaux"):
+        threading.Thread(target=send_signals_info, args=(uid,), daemon=True).start(); return
+    if t in ("💎 Devenir PRO", "💠 Devenir PRO", "💰 Paiement USDT"):
+        threading.Thread(target=send_pro_page, args=(uid,), daemon=True).start(); return
+    if t in ("📊 Mon Tableau de Bord", "📊 Mon compte"):
+        threading.Thread(target=send_account, args=(uid, uname), daemon=True).start(); return
+    if t in ("💰 Mes Gains", "📈 Mes Gains"):
+        threading.Thread(target=send_mes_gains, args=(uid,), daemon=True).start(); return
+    if t in ("🤝 Parrainage", "🤝 Devenir Affilié"):
+        threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start(); return
+
+    # ── 2. BROADCAST ADMIN (texte libre en attente) ──────────────
+    if uid == ADMIN_ID and t and not t.startswith("/"):
+        if handle_bcast_msg(uid, t):
+            return  # message traité comme broadcast
+
+    # ── 3. COMMANDES SLASH ────────────────────────────────────────
+    parts = t.split()
+    cmd   = parts[0].lower().lstrip("/").split("@")[0] if parts else ""
+    arg   = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    if cmd in ("start", "menu", "aide", "help"):
+        ref = int(arg) if arg.isdigit() else 0
+        db_register(uid, uname, ref, tg_fn=tg_send)
+        send_welcome(uid, uname); return
+
+    if cmd == "admin":
+        threading.Thread(target=send_admin_full, args=(uid,), daemon=True).start(); return
+    if cmd in ("pay",):
+        threading.Thread(target=send_pay_plan, args=(uid,), daemon=True).start(); return
+    if cmd == "pro":
+        threading.Thread(target=send_pro_page, args=(uid,), daemon=True).start(); return
+    if cmd in ("ref", "parrainage"):
+        threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start(); return
+    if cmd == "broker":
+        threading.Thread(target=send_broker, args=(uid,), daemon=True).start(); return
+    if cmd in ("guide", "pdf"):
+        threading.Thread(target=send_guide, args=(uid,), daemon=True).start(); return
+    if cmd in ("monstatus", "status", "compte", "account"):
+        threading.Thread(target=send_account, args=(uid, uname), daemon=True).start(); return
+    if cmd in ("rapports", "report", "perf"):
+        threading.Thread(target=send_rapports, args=(uid,), daemon=True).start(); return
+    if cmd == "challenge":
+        threading.Thread(target=send_challenge, args=(uid,), daemon=True).start(); return
+    if cmd == "support":
+        tg_send(uid, "📩 <b>Support</b>\nID : <code>{}</code>\n👉 @leaderOdg".format(uid)); return
+    if cmd == "marches":
+        threading.Thread(target=handle_marches_full, args=(uid,), daemon=True).start(); return
+
+    # ── TX Hash ────────────────────────────────────────────────────
+    if cmd == "txhash" and arg:
+        threading.Thread(target=lambda: handle_proof(uid, uname, tx=arg), daemon=True).start(); return
+
+    # ── Commandes admin ────────────────────────────────────────────
+    if uid == ADMIN_ID:
+        if cmd == "scan":
+            tg_send(uid, "📡 Scan lancé...")
+            threading.Thread(target=scan_and_send, daemon=True).start(); return
+        if cmd == "annuler":
+            _bcast_pending.pop(uid, None)
+            tg_send(uid, "❌ Broadcast annulé.", kb=kb_reply()); return
+        if cmd == "debug":
+            if not _last_results: tg_send(uid, "Aucun scan encore."); return
+            lines = ["🔍 <b>DEBUG DERNIER SCAN</b>", ""]
+            for r in _last_results:
+                tag  = " ⚡" if r.get("improv") else ""
+                icon = "🟢" if r["found"] else "⚪"
+                lines.append("{} <b>{}</b>{}  {}".format(
+                    icon, r["name"], tag,
+                    "Signal ✓" if r["found"] else r.get("reason", "?")))
+            msg = "\n".join(lines)
+            if len(msg) > 4000: msg = msg[:3900] + "\n...(tronqué)"
+            tg_send(uid, msg); return
+        if cmd == "activate":
+            handle_activate(uid, arg); return
+        if cmd == "degrade":
+            handle_degrade(uid, arg); return
+        if cmd == "testfree":
+            handle_testfree(uid); return
+        if cmd == "testpro":
+            handle_testpro(uid); return
+        if cmd in ("stats",):
+            threading.Thread(target=send_admin_stats_full, args=(uid,), daemon=True).start(); return
+        if cmd == "membres":
+            pg = int(arg) if arg.isdigit() else 1
+            threading.Thread(target=handle_membres, args=(uid, pg), daemon=True).start(); return
+        if cmd == "resetcount":
+            handle_resetcount(uid, arg); return
+        if cmd == "stop":
+            tg_send(uid, "🛑 Bot arrêté.")
+            raise KeyboardInterrupt
+
+    # ── Fallback : afficher le menu ───────────────────────────────
+    send_welcome(uid, uname)
+
 
 def dispatch_cb(cb):
     uid=cb["from"]["id"]; uname=cb.get("from",{}).get("username",""); data=cb.get("data","")
@@ -4681,8 +4746,8 @@ def process_update(upd):
 
             uid=msg["from"]["id"]; uname=msg.get("from",{}).get("username",""); txt=msg.get("text","")
             if txt:
+                log("INFO", clr("MSG @{} ({}): {}".format(uname or uid, uid, txt[:40]), "d"))
                 def _h(uid=uid,uname=uname,txt=txt):
-                    db_run("UPDATE users SET last_seen=? WHERE user_id=?",(datetime.now().isoformat(),uid))
                     if uid in _pay_state and _pay_state[uid].get("step")=="waiting":
                         cleaned=txt.strip()
                         if len(cleaned)>=20 and not cleaned.startswith("/"): handle_proof(uid,uname,tx=cleaned)
@@ -4710,28 +4775,42 @@ def startup():
     # Message de démarrage en arrière-plan — ne bloque pas le serveur HTTP
     def _notify():
         try:
-            tg_send(ADMIN_ID,"🤖 <b>AlphaBot PRO v9 — DÉMARRÉ!</b>\n\n"
-                "⚡ <b>Mode Improvisation actif</b>\n"
-                "🕐 {}  🎯 Score min: {}\n{}"
-                "🌍 Régime IA: <b>{}</b>\n"
-                "🏆 Challenge: <b>{:.4f}$</b> → {:.0f}$\n"
-                "📡 FREE {}/j  ·  PRO {}/j\n"
-                "💰 Paiement USDT auto\n\n"
-                "🛠 /admin".format(sl_l,sm,
-                    "🌍 <b>Week-end: crypto uniquement!</b>\n" if wknd else "",
-                    AI_REG.get("regime","Init"),ch["balance"],ch["start_bal"]*100,FREE_LIMIT,PRO_LIMIT))
-        except: pass
-    threading.Thread(target=_notify,daemon=True).start()
-    log("INFO",clr("AlphaBot v9 actif","b","g")); return True
+            tg_send(ADMIN_ID,
+                "🤖 <b>AlphaBot PRO v9 — DÉMARRÉ !</b>\n\n"
+                "⚡ Mode Improvisation actif\n"
+                "🕐 {}  🎯 Score min : <b>{}</b>\n"
+                "{}\n"
+                "🌍 Régime IA : <b>{}</b>\n"
+                "🏆 Challenge : <b>{:.4f}$</b> → {:.0f}$\n"
+                "📡 FREE {}/j  ·  PRO {}/j\n\n"
+                "✅ Bot actif — répond aux commandes\n"
+                "🛠 /admin pour le panel".format(
+                    sl_l, sm,
+                    "🌍 <b>Week-end : crypto uniquement !</b>" if wknd else "📈 Session : {}".format(sl_l),
+                    AI_REG.get("regime","Init"),
+                    ch["balance"], ch["start_bal"]*100,
+                    FREE_LIMIT, PRO_LIMIT),
+                kb=kb_reply())   # ← envoie le clavier au démarrage
+        except Exception as e:
+            log("WARN", "notify startup: {}".format(e))
+    threading.Thread(target=_notify, daemon=True).start()
+    log("INFO", clr("AlphaBot v9 actif", "b", "g")); return True
 
 def make_wh():
     class WH(BaseHTTPRequestHandler):
         def do_POST(self):
             try:
-                body=self.rfile.read(int(self.headers.get("Content-Length",0))); upd=json.loads(body.decode())
+                length = int(self.headers.get("Content-Length", 0))
+                body   = self.rfile.read(length)
+                # Répondre immédiatement 200 à Telegram
                 self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-                threading.Thread(target=process_update,args=(upd,),daemon=True).start()
-            except: self.send_response(200); self.end_headers()
+                if length > 0:
+                    upd = json.loads(body.decode("utf-8"))
+                    threading.Thread(target=process_update, args=(upd,), daemon=True).start()
+            except Exception as ex:
+                log("ERR", "WebhookHandler: {}".format(ex))
+                try: self.send_response(200); self.end_headers()
+                except: pass
         def do_GET(self):
             ch=chal_get(); reg=AI_REG
             self.send_response(200); self.end_headers()
@@ -4782,16 +4861,23 @@ def main():
     else:
         log("INFO",clr("Mode polling local","y"))
         tg_req("deleteWebhook",{"drop_pending_updates":"true"}); time.sleep(2)
+        # Purge old updates
         offset=0
         for _ in range(20):
             batch=tg_req("getUpdates",{"offset":offset,"timeout":0,"limit":100}).get("result",[])
             if not batch: break
             offset=batch[-1]["update_id"]+1
+        log("INFO", clr("Polling démarré (offset={})".format(offset), "g"))
         ls=la=lc=0
         while True:
             try:
-                for upd in tg_req("getUpdates",{"offset":offset,"timeout":10,"limit":100}).get("result",[]):
-                    offset=upd["update_id"]+1; threading.Thread(target=process_update,args=(upd,),daemon=True).start()
+                updates = tg_req("getUpdates", {
+                    "offset": offset, "timeout": 10, "limit": 100,
+                    "allowed_updates": '["message","callback_query","chat_member"]'
+                }).get("result", [])
+                for upd in updates:
+                    offset=upd["update_id"]+1
+                    threading.Thread(target=process_update,args=(upd,),daemon=True).start()
                 now=time.time()
                 if now-ls>=SCAN_SEC: ls=now; threading.Thread(target=scan_and_send,daemon=True).start()
                 if now-la>=300: la=now; threading.Thread(target=refresh_ai,daemon=True).start()
