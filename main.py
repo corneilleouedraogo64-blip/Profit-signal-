@@ -324,12 +324,39 @@ def save_signal(s, sn):
     con.close()
 
 def daily_stats(ds=None):
-    ds=ds or datetime.now().strftime("%Y-%m-%d"); con=_conn(); cur=con.cursor()
-    cur.execute("SELECT pair,side,rr,g001,g1,l001,l1,session,mode FROM signals WHERE sent_at LIKE ? ORDER BY sent_at",(ds+"%",))
-    rows=cur.fetchall(); con.close()
-    w=sum(1 for r in rows if r[2]>=2.5)
-    return {"date":ds,"n":len(rows),"wins":w,"losses":len(rows)-w,
-            "g001":round(sum(r[3] for r in rows),2),"g1":round(sum(r[4] for r in rows),2),"rows":rows}
+    ds = ds or datetime.now().strftime("%Y-%m-%d")
+    con = _conn(); cur = con.cursor()
+    # Récupère les signaux du jour avec leur résultat réel depuis sig_track
+    cur.execute("""
+        SELECT s.pair, s.side, s.rr, s.g001, s.g1, s.l001, s.l1, s.session, s.mode,
+               COALESCE(st.status, 'OPEN') as result
+        FROM signals s
+        LEFT JOIN sig_track st ON st.sig_id = s.id
+        WHERE s.sent_at LIKE ?
+        ORDER BY s.sent_at
+    """, (ds + "%",))
+    rows = cur.fetchall(); con.close()
+    # Compter uniquement les vrais TP confirmés (pas estimés)
+    confirmed_tp   = [r for r in rows if r[9] == "TP"]
+    confirmed_sl   = [r for r in rows if r[9] == "SL"]
+    open_signals   = [r for r in rows if r[9] == "OPEN"]
+    # Gains réels = uniquement les TP confirmés ; gains estimés = signaux ouverts
+    real_g1   = round(sum(r[4] for r in confirmed_tp), 2)
+    real_g001 = round(sum(r[3] for r in confirmed_tp), 2)
+    pot_g1    = round(sum(r[4] for r in open_signals), 2)   # potentiel si TP
+    pot_g001  = round(sum(r[3] for r in open_signals), 2)
+    return {
+        "date":   ds,
+        "n":      len(rows),
+        "wins":   len(confirmed_tp),
+        "losses": len(confirmed_sl),
+        "open":   len(open_signals),
+        "g001":   real_g001,
+        "g1":     real_g1,
+        "pot_g001": pot_g001,
+        "pot_g1":   pot_g1,
+        "rows":   rows,
+    }
 
 def weekly_stats():
     ws=(datetime.now()-timedelta(days=7)).strftime("%Y-%m-%d")
@@ -616,34 +643,34 @@ def improv_analyze(m, b, h1, m5, sn, news_ok):
         # EMA Bounce : prix au-dessus EMA20 qui rebondit dessus
         if ema8 > ema20 and abs(last - ema20) / ema20 < 0.003:
             mode_name = "EMA_BOUNCE"; side = "BUY"
-            sl = ema20 - a * 1.2; tp = last + (last - sl) * 2.5; sc = 42
+            sl = ema20 - a * 1.2; tp = last + (last - sl) * 3.0; sc = 48
         # Momentum : 3 bougies vertes consécutives + volume
         elif all(m5[-i]["c"]>m5[-i]["o"] for i in range(1,4)):
             mode_name = "MOMENTUM"; side = "BUY"
             sl = min(x["l"] for x in m5[-5:]) * 0.999
-            tp = last + (last - sl) * 2.5; sc = 38
+            tp = last + (last - sl) * 3.0; sc = 42
         # Structure H1 : prix au-dessus de la dernière clôture H1
         elif h1[-1]["c"] > h1[-2]["c"] and last > h1[-1]["c"] * 0.999:
             mode_name = "STRUCTURE_PLAY"; side = "BUY"
-            sl = h1[-1]["l"] * 0.999; tp = last + (last - sl) * 2.5; sc = 45
+            sl = h1[-1]["l"] * 0.999; tp = last + (last - sl) * 3.0; sc = 50
 
     elif b == "BEARISH":
         if ema8 < ema20 and abs(last - ema20) / ema20 < 0.003:
             mode_name = "EMA_BOUNCE"; side = "SELL"
-            sl = ema20 + a * 1.2; tp = last - (sl - last) * 2.5; sc = 42
+            sl = ema20 + a * 1.2; tp = last - (sl - last) * 3.0; sc = 48
         elif all(m5[-i]["c"]<m5[-i]["o"] for i in range(1,4)):
             mode_name = "MOMENTUM"; side = "SELL"
             sl = max(x["h"] for x in m5[-5:]) * 1.001
-            tp = last - (sl - last) * 2.5; sc = 38
+            tp = last - (sl - last) * 3.0; sc = 42
         elif h1[-1]["c"] < h1[-2]["c"] and last < h1[-1]["c"] * 1.001:
             mode_name = "STRUCTURE_PLAY"; side = "SELL"
-            sl = h1[-1]["h"] * 1.001; tp = last - (sl - last) * 2.5; sc = 45
+            sl = h1[-1]["h"] * 1.001; tp = last - (sl - last) * 3.0; sc = 50
 
     if not mode_name or not side: return None
 
     risk = abs(entry - sl)
     gain = abs(tp - entry)
-    if risk <= 0 or gain / risk < 2.0: return None
+    if risk <= 0 or gain / risk < 3.0: return None  # RR min 3.0 pour improv
 
     # Bonus session
     sc += int(sess_qual * 10)
@@ -669,7 +696,7 @@ def news_check():
         return True,"✅ OK"
     except: return True,"✅ OK"
 
-def agent_analyze(m, score_min, news_ok, q):
+def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
     try:
         sn,_,_,_=get_session()
         h1=fetch_c(m["sym"],"1h","30d") or fetch_c(m["sym"],"4h","60d")
@@ -753,23 +780,32 @@ def agent_analyze(m, score_min, news_ok, q):
                              "badges":" · ".join(badges),"time":datetime.now(timezone.utc).strftime("%H:%M"),
                              "mode":"NORMAL","risk_mult":1.0}
 
-        # ── MODE IMPROVISATION : pas de setup ICT parfait ──
-        if not sig:
-            improv=improv_analyze(m,b,h1,m5,sn,news_ok)
-            if improv:
-                e=improv["entry"]; tp=improv["tp"]; sl_v=improv["sl"]
-                dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                gain=abs(tp-e); risk=abs(e-sl_v); ptp=gain/pip; psl=risk/pip
-                sig={"name":m["name"],"cat":m["cat"],"side":improv["side"],
-                     "entry":f(e),"tp":f(tp),"sl":f(sl_v),"rr":improv["rr"],
-                     "score":improv["score"],"score_min":s_min,"atr":f(a),"sp":sp,
-                     "bias":b,"btype":bt,
-                     "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
-                     "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                     "badges":"Mode: {}".format(improv["mode"]),
-                     "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                     "mode":improv["mode"],"risk_mult":improv["risk_mult"],
-                     "improv":True}
+        # ── MODE IMPROVISATION : uniquement après 500 cycles sans signal ICT ──
+        if not sig and improv_unlocked:
+            # Cooldown par paire : 4h minimum entre deux improv sur la même paire
+            last_improv_ts = _improv_cd.get(m["name"], 0)
+            if time.time() - last_improv_ts < 4 * 3600:
+                # Cooldown actif → pas d'improv
+                pass
+            else:
+                improv = improv_analyze(m, b, h1, m5, sn, news_ok)
+                if improv and improv["rr"] >= 3.0:   # RR minimum 3.0 pour improv
+                    e = improv["entry"]; tp = improv["tp"]; sl_v = improv["sl"]
+                    dp = 2 if e > 1000 else (3 if e > 10 else 5)
+                    f  = lambda v: round(v, dp); pip = m["pip"]
+                    gain = abs(tp - e); risk = abs(e - sl_v)
+                    ptp  = gain / pip;  psl  = risk / pip
+                    sig  = {"name":m["name"],"cat":m["cat"],"side":improv["side"],
+                            "entry":f(e),"tp":f(tp),"sl":f(sl_v),"rr":improv["rr"],
+                            "score":improv["score"],"score_min":s_min,"atr":f(a),"sp":sp,
+                            "bias":b,"btype":bt,
+                            "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
+                            "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
+                            "badges":"Mode: {}".format(improv["mode"]),
+                            "time":datetime.now(timezone.utc).strftime("%H:%M"),
+                            "mode":improv["mode"],"risk_mult":improv["risk_mult"],
+                            "improv":True,
+                            "improv_cycles":_cycles_no_signal}  # info cycles pour le message
 
         if sig:
             q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,
@@ -1132,28 +1168,54 @@ def fmt_pro(s, news, sl_label):
     return "\n".join(lines)
 
 def fmt_free(s, news, sl_label):
-    se         = "🟢" if s["side"] == "BUY" else "🔴"
-    sf         = "ACHAT" if s["side"] == "BUY" else "VENTE"
-    emo        = CAT_EMO.get(s["cat"], "📊")
-    improv_tag = " ⚡" if s.get("improv") else ""
-    sep        = "═" * 22
-    # NOTE: on n'utilise PAS .format() avec ${xxx} → IndexError Python 3.14
-    # On construit ligne par ligne avec f-strings
-    lines = [
-        f"{se} <b>SIGNAL {sf} — {s['name']}</b>  {emo}{improv_tag}",
-        sep,
-        f"📍 Entrée : <code>{s['entry']}</code>",
-        f"✅ TP     : <code>{s['tp']}</code>",
-        f"❌ SL     : <code>{s['sl']}</code>",
-        f"📐 RR : <b>1:{s['rr']}</b>  ·  Score : <b>{s['score']}/100</b>",
-        "",
-        f"💵 Lot 0.01 : <b>+${s['g001']}</b>",
-        f"💰 Lot 1.00 : <b>+${s['g1']}</b>",
-        "",
-        f"🔒 Analyse complète → PRO {PRO_PRICE}$ USDT",
-        sep,
-        "🤖 AlphaBot  ·  @leaderodg_bot",
-    ]
+    se  = "🟢" if s["side"] == "BUY" else "🔴"
+    sf  = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo = CAT_EMO.get(s["cat"], "📊")
+    sep = "═" * 22
+
+    if s.get("improv"):
+        # ── Message improv : très explicite + warning rouge ─────────
+        tf_used = "M5/H1"   # timeframes utilisés pour l'improv
+        cycles  = s.get("improv_cycles", "500+")
+        lines = [
+            f"🚨 <b>⚡ SIGNAL IMPROVISATION ⚡</b> 🚨",
+            sep,
+            f"⚠️ <b>ATTENTION — Setup allégé</b>",
+            f"📌 Déclenché après <b>{cycles}</b> cycles sans signal ICT",
+            f"⏱ Timeframe analysé : <b>{tf_used}</b>",
+            f"🧠 Mode : <b>{s.get('mode', 'IMPROV')}</b>",
+            sep,
+            f"{se} <b>{sf} — {s['name']}</b>  {emo}",
+            f"📍 Entrée  : <code>{s['entry']}</code>",
+            f"❌ SL      : <code>{s['sl']}</code>",
+            f"✅ TP      : <code>{s['tp']}</code>",
+            f"📐 RR      : <b>1:{s['rr']}</b>",
+            f"🎯 Score   : <b>{s['score']}/100</b>",
+            sep,
+            f"💵 Lot 0.01 : <b>+${s['g001']}</b>  si TP  /  <b>-${s['l001']}</b>  si SL",
+            f"💰 Lot 1.00 : <b>+${s['g1']}</b>  si TP  /  <b>-${s['l1']}</b>  si SL",
+            sep,
+            "⚠️ <b>Risque réduit recommandé (50% taille normale)</b>",
+            "🔒 Analyse ICT complète → PRO " + str(PRO_PRICE) + "$ USDT",
+            "🤖 AlphaBot  ·  @leaderodg_bot",
+        ]
+    else:
+        # ── Message signal ICT normal ────────────────────────────────
+        lines = [
+            f"{se} <b>SIGNAL {sf} — {s['name']}</b>  {emo}",
+            sep,
+            f"📍 Entrée : <code>{s['entry']}</code>",
+            f"✅ TP     : <code>{s['tp']}</code>",
+            f"❌ SL     : <code>{s['sl']}</code>",
+            f"📐 RR : <b>1:{s['rr']}</b>  ·  Score : <b>{s['score']}/100</b>",
+            "",
+            f"💵 Lot 0.01 : <b>+${s['g001']}</b>",
+            f"💰 Lot 1.00 : <b>+${s['g1']}</b>",
+            "",
+            "🔒 Analyse complète → PRO " + str(PRO_PRICE) + "$ USDT",
+            sep,
+            "🤖 AlphaBot  ·  @leaderodg_bot",
+        ]
     return "\n".join(lines)
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
@@ -1161,7 +1223,7 @@ def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     improv_count=sum(1 for r in results if r.get("improv"))
     lines=["🔍 <b>SCAN {} UTC</b>  ·  {}".format(scan_t,sl_l),
            "🎯 Score min:<b>{}</b>  ·  News:{}".format(sm,"✅" if "✅" in news else "⚠️"),
-           "💵 Aujourd'hui: <b>+${}</b>  ·  {} signaux  ·  {} wins".format(st["g1"],st["n"],st["wins"]),
+           "💵 Confirmés: <b>+${}</b>  ·  {}✅ {}❌ {}🔄 ({} signaux)".format(st["g1"],st["wins"],st["losses"],st.get("open",0),st["n"]),
            "🤖 IA: <b>{:.4f}$</b>  ·  Régime: {}".format(ch["balance"],reg.get("regime","?")),
            "⚡ Improv: {} signal(s) allégé(s)".format(improv_count) if improv_count else "",""]
     cats={}
@@ -1182,24 +1244,49 @@ def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     return "\n".join(lines)
 
 def fmt_daily(st):
-    if st["n"]==0: return "📊 <b>RAPPORT {}</b>\n\nAucun signal.".format(st["date"])
-    wr=int(st["wins"]/st["n"]*100); ch=chal_get()
-    improv_sigs=db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'",(st["date"]+"%",))
-    improv_count=improv_sigs[0][0] if improv_sigs else 0
-    perf="🔥🔥" if st["g1"]>2000 else "🔥" if st["g1"]>1000 else "💰"
-    lines=["📯 <b>RAPPORT DU JOUR — AlphaBot PRO</b> {}".format(perf),"═"*22,
-           "📅 {}  ·  {} signaux  ·  {}% réussite".format(st["date"],st["n"],wr),
-           "💵 Lot 0.01:<b>+${}</b>  ·  Lot 1.00:<b>+${}</b>".format(st["g001"],st["g1"]),
-           "⚡ Dont {} signal(s) improvisation".format(improv_count) if improv_count else "",
-           "","🤖 <b>IA Challenge: {:.4f}$</b>  AM:{}/4".format(ch["balance"],ch["am_cycle"]),"","━"*20,""]
+    if st["n"] == 0:
+        return "📊 <b>RAPPORT {}</b>\n\nAucun signal.".format(st["date"])
+    closed = st["wins"] + st["losses"]
+    wr = int(st["wins"] / closed * 100) if closed > 0 else 0
+    ch = chal_get()
+    improv_sigs = db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'", (st["date"] + "%",))
+    improv_count = improv_sigs[0][0] if improv_sigs else 0
+    perf = "🔥🔥" if st["g1"] > 2000 else "🔥" if st["g1"] > 1000 else "💰"
+    sep = "═" * 22
+    lines = [
+        f"📯 <b>RAPPORT DU JOUR — AlphaBot PRO</b> {perf}",
+        sep,
+        f"📅 {st['date']}  ·  {st['n']} signaux envoyés",
+        f"✅ TP confirmés : <b>{st['wins']}</b>  ·  ❌ SL : <b>{st['losses']}</b>  ·  🔄 En cours : <b>{st['open']}</b>",
+        f"📊 Win rate réel : <b>{wr}%</b>" if closed > 0 else "📊 Win rate : <b>En attente résultats</b>",
+        f"💵 Lot 0.01 confirmé : <b>+${st['g001']}</b>  · potentiel +${st['pot_g001']}",
+        f"💰 Lot 1.00 confirmé : <b>+${st['g1']}</b>  · potentiel +${st['pot_g1']}",
+        "⚡ Dont {} signal(s) improvisation".format(improv_count) if improv_count else "",
+        "",
+        f"🤖 <b>IA Challenge: {ch['balance']:.4f}$</b>  AM:{ch['am_cycle']}/4",
+        "",
+        "━" * 20,
+        "",
+    ]
     for row in st["rows"]:
-        pair,side,rr,g001,g1,l001,l1,sess,mode=row
-        ok=rr>=2.5; d="⬆️" if side=="BUY" else "⬇️"
-        improv_tag=" ⚡" if mode!="NORMAL" else ""
-        lines.append("{} <b>{}</b>{} {} {} — RR <b>1:{}</b>  {}".format(
-            "🟢" if ok else "🔴",pair,improv_tag,d,"ACHAT" if side=="BUY" else "VENTE",rr,
-            "+${:.0f}".format(g1) if ok else "-${:.0f}".format(l1)+" (lot 1)"))
-    lines+=["","═"*22,"💰 Total lot 1.00: <b>+${}</b>".format(st["g1"]),"📩 @leaderodg_bot  ·  {}$ USDT".format(PRO_PRICE),"⚠️ Not financial advice"]
+        pair, side, rr, g001, g1, l001, l1, sess, mode, result = row
+        d = "⬆️" if side == "BUY" else "⬇️"
+        improv_tag = " ⚡" if mode != "NORMAL" else ""
+        if result == "TP":
+            icon = "✅"; detail = f"+${g1:.0f} (lot 1)"
+        elif result == "SL":
+            icon = "❌"; detail = f"-${l1:.0f} (lot 1)"
+        else:
+            icon = "🔄"; detail = "en cours..."
+        lines.append(f"{icon} <b>{pair}</b>{improv_tag} {d} {'ACHAT' if side=='BUY' else 'VENTE'} — RR <b>1:{rr}</b>  {detail}")
+    lines += [
+        "",
+        sep,
+        f"💰 Total confirmé lot 1.00 : <b>+${st['g1']}</b>",
+        f"🔄 Potentiel en cours      : <b>+${st['pot_g1']}</b>",
+        f"📩 @leaderodg_bot  ·  {PRO_PRICE}$ USDT",
+        "⚠️ Gains confirmés = TP atteints réels. Not financial advice.",
+    ]
     return "\n".join(l for l in lines if l is not None)
 
 # ══════════════════════════════════════════════════════
@@ -1208,6 +1295,10 @@ def fmt_daily(st):
 _sent=set(); _sent_lk=threading.Lock()
 _last_d=""; _last_w=""; _scan_run=False; _test_mode=""
 _last_results=[]; _pay_state={}
+# ── Compteur improv ──────────────────────────────────────────────────
+_cycles_no_signal = 0          # cycles consécutifs sans aucun signal ICT
+IMPROV_UNLOCK_CYCLES = 500     # seuil pour autoriser l'improvisation
+_improv_cd = {}                # {pair_name: timestamp} cooldown par paire
 # v13 compat aliases
 _sent_lock         = _sent_lk
 _last_daily        = _last_d
@@ -1321,48 +1412,83 @@ def scan_and_send():
     finally: _scan_run=False
 
 def _scan_inner():
-    global _last_d,_last_w,_last_results
-    now=datetime.now(timezone.utc).replace(tzinfo=None)
-    scan_t=now.strftime("%H:%M"); ds=now.strftime("%Y-%m-%d"); hs=now.strftime("%H"); wd=now.weekday()
-    sn,sm,sl_l,wknd=get_session()
-    sm = get_adaptive_score_min()  # Score adaptatif
-    log("INFO",clr("Scan {} — {} — Score~{}".format(scan_t,sl_l,sm),"d"))
-    news_ok,news_lbl=news_check()
-    active=[m for m in MARKETS if not wknd or m.get("crypto",False)]
-    q=Queue(); threads=[]
+    global _last_d, _last_w, _last_results, _cycles_no_signal
+    now    = datetime.now(timezone.utc).replace(tzinfo=None)
+    scan_t = now.strftime("%H:%M"); ds = now.strftime("%Y-%m-%d")
+    hs     = now.strftime("%H");    wd = now.weekday()
+    sn, sm, sl_l, wknd = get_session()
+    sm = get_adaptive_score_min()
+    # Improv autorisé seulement après IMPROV_UNLOCK_CYCLES cycles sans signal ICT
+    improv_unlocked = (_cycles_no_signal >= IMPROV_UNLOCK_CYCLES)
+    log("INFO", clr("Scan {} — {} — Score~{} | No-sig cycles: {}/{}{}".format(
+        scan_t, sl_l, sm, _cycles_no_signal, IMPROV_UNLOCK_CYCLES,
+        " ⚡IMPROV OK" if improv_unlocked else ""), "d"))
+    news_ok, news_lbl = news_check()
+    active = [m for m in MARKETS if not wknd or m.get("crypto", False)]
+    q = Queue(); threads = []
     for m in active:
-        t=threading.Thread(target=agent_analyze,args=(m,sm,news_ok,q),daemon=True)
+        # On passe improv_unlocked à agent_analyze
+        t = threading.Thread(target=agent_analyze,
+                             args=(m, sm, news_ok, q, improv_unlocked), daemon=True)
         t.start(); threads.append(t)
     for t in threads: t.join(timeout=15)
-    raw={}
+    raw = {}
     while not q.empty():
-        try: r=q.get_nowait(); raw[r["name"]]=r
+        try: r = q.get_nowait(); raw[r["name"]] = r
         except Empty: break
-    results=[raw.get(m["name"],{"name":m["name"],"cat":m["cat"],"found":False,"reason":"Timeout","improv":False}) for m in active]
-    _last_results=results; cleanup_sent(ds)
-    sigs=[(r["signal"],"{}-{}-{}-{}".format(r["signal"]["name"],r["signal"]["side"],ds,hs)) for r in results if r["found"]]
-    with _sent_lk: sigs=[(s,k) for s,k in sigs if k not in _sent]
-    sigs.sort(key=lambda x:-x[0]["score"])
-    pru=pro_users(); fru=free_users()
-    pru_eff=[u for u in pru if not (u==ADMIN_ID and _test_mode=="FREE")]
-    fru_eff=list(fru)+([ADMIN_ID] if _test_mode=="FREE" and ADMIN_ID not in fru else [])
-    for sig,key in sigs:
-        msg_p=fmt_pro(sig,news_lbl,sl_l); msg_f=fmt_free(sig,news_lbl,sl_l)
-        r=tg_send(CHANNEL_ID,msg_f)
+    results = [raw.get(m["name"], {"name":m["name"],"cat":m["cat"],"found":False,
+               "reason":"Timeout","improv":False}) for m in active]
+    _last_results = results; cleanup_sent(ds)
+    sigs = [(r["signal"], "{}-{}-{}-{}".format(r["signal"]["name"], r["signal"]["side"], ds, hs))
+            for r in results if r["found"]]
+    with _sent_lk: sigs = [(s, k) for s, k in sigs if k not in _sent]
+    sigs.sort(key=lambda x: -x[0]["score"])
+
+    # ── Mise à jour compteur cycles ────────────────────────────────
+    # On compte uniquement les signaux ICT vrais (non improv)
+    ict_sigs = [s for s, k in sigs if not s.get("improv")]
+    if ict_sigs:
+        _cycles_no_signal = 0   # reset : un vrai signal ICT trouvé
+    else:
+        _cycles_no_signal += 1  # aucun signal ICT → on incrémente
+
+    pru     = pro_users(); fru = free_users()
+    pru_eff = [u for u in pru if not (u == ADMIN_ID and _test_mode == "FREE")]
+    fru_eff = list(fru) + ([ADMIN_ID] if _test_mode == "FREE" and ADMIN_ID not in fru else [])
+    for sig, key in sigs:
+        msg_p = fmt_pro(sig, news_lbl, sl_l)
+        msg_f = fmt_free(sig, news_lbl, sl_l)
+        # Si c'est un improv → envoyer sticker d'alerte en plus
+        if sig.get("improv"):
+            stk = STK_FIRE if sig["side"] == "SELL" else STK_ROCKET
+            tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
+            time.sleep(0.3)
+        r = tg_send(CHANNEL_ID, msg_f)
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
-            save_signal(sig,sn)
-            mode_tag=" ⚡IMPROV" if sig.get("improv") else ""
-            log("SIG","{} {} RR:1:{} Sc:{}{} G1:+${}".format(clr(sig["name"],"b","c"),sig["side"],sig["rr"],sig["score"],mode_tag,sig["g1"]))
+            save_signal(sig, sn)
+            if sig.get("improv"):
+                _improv_cd[sig["name"]] = time.time()  # cooldown 4h par paire
+            mode_tag = " ⚡IMPROV" if sig.get("improv") else ""
+            log("SIG", "{} {} RR:1:{} Sc:{}{} G1:+${}".format(
+                clr(sig["name"], "b", "c"), sig["side"], sig["rr"],
+                sig["score"], mode_tag, sig["g1"]))
         for puid in pru_eff:
-            if count_today(puid)<PRO_LIMIT: tg_send(puid,msg_p); count_incr(puid); time.sleep(0.04)
+            if count_today(puid) < PRO_LIMIT:
+                tg_send(puid, msg_p); count_incr(puid); time.sleep(0.04)
         for fuid in fru_eff:
-            c=count_today(fuid)
-            if c<FREE_LIMIT: tg_send(fuid,msg_f); count_incr(fuid); time.sleep(0.04)
-            elif c==FREE_LIMIT: tg_send(fuid,"🛑 <b>Limite FREE {}/{}</b>\n\n/pay — {}$ USDT\n{} filleuls = {} mois PRO!".format(FREE_LIMIT,FREE_LIMIT,PRO_PRICE,REF_TARGET,REF_MONTHS)); count_incr(fuid)
-    if sigs: report=fmt_scan(results,news_lbl,scan_t,sl_l,sm,len(sigs)); tg_send(CHANNEL_ID,report); tg_send(ADMIN_ID,report)
+            c = count_today(fuid)
+            if c < FREE_LIMIT:
+                tg_send(fuid, msg_f); count_incr(fuid); time.sleep(0.04)
+            elif c == FREE_LIMIT:
+                tg_send(fuid, "🛑 <b>Limite FREE {}/{}</b>\n\n/pay — {}$ USDT\n{} filleuls = {} mois PRO!".format(
+                    FREE_LIMIT, FREE_LIMIT, PRO_PRICE, REF_TARGET, REF_MONTHS))
+                count_incr(fuid)
+    if sigs:
+        report = fmt_scan(results, news_lbl, scan_t, sl_l, sm, len(sigs))
+        tg_send(CHANNEL_ID, report); tg_send(ADMIN_ID, report)
     for puid in pru_eff:
-        if puid!=ADMIN_ID and sigs: tg_send(puid,report); time.sleep(0.04)
+        if puid != ADMIN_ID and sigs: tg_send(puid, report); time.sleep(0.04)
     # Rapport quotidien
     if int(hs)>=DAILY_HOUR and _last_d!=ds and not rep_sent(ds):
         st=daily_stats(ds)
@@ -4471,16 +4597,58 @@ def dispatch_cb(cb):
         send_welcome(uid, uname)
 
 
+def track_user(uid, uname, first_name=""):
+    """
+    Appelé à chaque interaction — enregistre l'utilisateur s'il est nouveau
+    et notifie l'admin à la première apparition.
+    Utilisé pour NE JAMAIS perdre un utilisateur même si la DB a été resetée.
+    """
+    try:
+        # Vérifier si déjà connu AVANT db_register
+        existing = db_one("SELECT user_id FROM users WHERE user_id=?", (uid,))
+        is_new = existing is None
+        # Enregistrer (INSERT OR IGNORE + update last_seen)
+        db_register(uid, uname)
+        db_run("UPDATE users SET last_seen=? WHERE user_id=?",
+               (datetime.now().isoformat(), uid))
+        if uname:
+            db_run("UPDATE users SET username=? WHERE user_id=?", (uname, uid))
+        # Notification admin uniquement pour les nouveaux
+        if is_new and uid != ADMIN_ID:
+            total, pro, sigs, _, _ = global_stats()
+            name_disp = "@" + uname if uname else (first_name or "Inconnu")
+            msg_admin = (
+                "🆕 <b>NOUVEL UTILISATEUR</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🆔 ID       : <code>{}</code>\n"
+                "👤 Username : {}\n"
+                "📋 Prenom   : {}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "👥 Total DB : <b>{}</b>  (PRO: <b>{}</b>)\n"
+                "📡 Signaux  : {}"
+            ).format(uid, "@" + uname if uname else "s/u",
+                     first_name or "s/p", total, pro, sigs)
+            tg_send(ADMIN_ID, msg_admin,
+                kb={"inline_keyboard": [[
+                    {"text": "Activer PRO", "callback_data": "adm_pro_{}".format(uid)},
+                    {"text": "Contacter",   "url": "tg://user?id={}".format(uid)},
+                ]]})
+            log("INFO", clr("Nouveau user: {} ID:{} — notif admin OK".format(
+                name_disp, uid), "g"))
+    except Exception as e:
+        log("WARN", "track_user {}: {}".format(uid, e))
+
+
 def handle_new_group_member(uid, uname, first_name):
     """
     Nouveau membre rejoint le groupe :
-    1. Enregistrement en base
+    1. Enregistrement en base (via track_user)
     2. Message de bienvenue + essai PRO
     3. Invitation groupe VIP
-    4. Notification admin avec ID + username
+    4. Notification admin (via track_user)
     """
     try:
-        db_register(uid, uname, tg_fn=tg_send)
+        track_user(uid, uname, first_name)  # enregistrement + notif admin
         name = "@" + uname if uname else first_name or "Trader"
 
         # ── Message de bienvenue ────────────────────────────────
@@ -4575,18 +4743,34 @@ def process_update(upd):
                             args=(uid, uname, fname), daemon=True).start()
                 return
 
-            uid=msg["from"]["id"]; uname=msg.get("from",{}).get("username",""); txt=msg.get("text","")
+            uid   = msg["from"]["id"]
+            uname = msg.get("from", {}).get("username", "")
+            fname = msg.get("from", {}).get("first_name", "")
+            txt   = msg.get("text", "")
+            # ── Tracker TOUT utilisateur qui envoie un message ───
+            threading.Thread(target=track_user, args=(uid, uname, fname), daemon=True).start()
             if txt:
                 log("INFO", clr("MSG @{} ({}): {}".format(uname or uid, uid, txt[:40]), "d"))
-                def _h(uid=uid,uname=uname,txt=txt):
-                    if uid in _pay_state and _pay_state[uid].get("step")=="waiting":
-                        cleaned=txt.strip()
-                        if len(cleaned)>=20 and not cleaned.startswith("/"): handle_proof(uid,uname,tx=cleaned)
-                        else: dispatch(uid,uname,txt)
-                    else: dispatch(uid,uname,txt)
-                threading.Thread(target=_h,daemon=True).start()
+                def _h(uid=uid, uname=uname, txt=txt):
+                    if uid in _pay_state and _pay_state[uid].get("step") == "waiting":
+                        cleaned = txt.strip()
+                        if len(cleaned) >= 20 and not cleaned.startswith("/"):
+                            handle_proof(uid, uname, tx=cleaned)
+                        else:
+                            dispatch(uid, uname, txt)
+                    else:
+                        dispatch(uid, uname, txt)
+                threading.Thread(target=_h, daemon=True).start()
         elif "callback_query" in upd:
-            threading.Thread(target=dispatch_cb,args=(upd["callback_query"],),daemon=True).start()
+            cb = upd["callback_query"]
+            cb_uid   = cb.get("from", {}).get("id")
+            cb_uname = cb.get("from", {}).get("username", "")
+            cb_fname = cb.get("from", {}).get("first_name", "")
+            if cb_uid:
+                # Tracker aussi les callbacks (clics sur boutons)
+                threading.Thread(target=track_user,
+                                 args=(cb_uid, cb_uname, cb_fname), daemon=True).start()
+            threading.Thread(target=dispatch_cb, args=(cb,), daemon=True).start()
     except Exception as e: log("ERR","process_update: {}".format(e))
 
 # ══════════════════════════════════════════════════════
@@ -4643,10 +4827,21 @@ def make_wh():
                 try: self.send_response(200); self.end_headers()
                 except: pass
         def do_GET(self):
-            ch=chal_get(); reg=AI_REG
-            self.send_response(200); self.end_headers()
-            self.wfile.write("AlphaBot v9 OK | {:.4f}$ | {}".format(ch["balance"],reg.get("regime","?")).encode())
-        def log_message(self,*a): pass
+            path = self.path.split("?")[0]
+            ch   = chal_get(); reg = AI_REG
+            if path == "/health":
+                # Endpoint dédié au keepalive — réponse JSON légère
+                body = '{{"status":"ok","balance":{:.4f},"regime":"{}","cycles":{}}}'.format(
+                    ch["balance"], reg.get("regime","?"), _cycles_no_signal).encode()
+                self.send_response(200)
+                self.send_header("Content-Type","application/json")
+                self.end_headers(); self.wfile.write(body)
+            else:
+                self.send_response(200); self.end_headers()
+                self.wfile.write(
+                    "AlphaBot v9 OK | {:.4f}$ | {} | cycles: {}".format(
+                        ch["balance"], reg.get("regime","?"), _cycles_no_signal).encode())
+        def log_message(self, *a): pass
     return WH
 
 def main():
@@ -4709,10 +4904,17 @@ def main():
                 time.sleep(10)
         threading.Thread(target=_loop,daemon=True).start()
         def _ping():
+            """Ping toutes les 5 min sur /health pour empêcher Render de dormir."""
+            time.sleep(30)  # laisser le serveur démarrer
             while True:
-                try: time.sleep(14*60); http_get(render.rstrip("/"),timeout=10); log("INFO",clr("Ping OK","d"))
-                except: pass
-        threading.Thread(target=_ping,daemon=True).start()
+                try:
+                    url = render.rstrip("/") + "/health"
+                    http_get(url, timeout=10)
+                    log("INFO", clr("Keepalive /health OK", "d"))
+                except Exception as e:
+                    log("WARN", "Keepalive échoué: {}".format(e))
+                time.sleep(5 * 60)  # toutes les 5 minutes
+        threading.Thread(target=_ping, daemon=True).start()
         try: server.serve_forever()
         except KeyboardInterrupt: tg_send(ADMIN_ID,"🛑 Bot arrêté."); tg_req("deleteWebhook",{})
     else:
