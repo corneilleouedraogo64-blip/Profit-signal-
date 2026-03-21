@@ -1116,24 +1116,27 @@ def fmt_pro(s,news,sl_label):
              news="✅ OK" if "✅" in news else "⚠️ Actif",
              sp_s="✅ OK" if s["sp"]<3 else "⚠️ Large")
 
-def fmt_free(s,news,sl_label):
-    se="🟢" if s["side"]=="BUY" else "🔴"; sf="ACHAT" if s["side"]=="BUY" else "VENTE"
-    emo=CAT_EMO.get(s["cat"],"📊")
-    is_improv=s.get("improv",False)
-    improv_tag=" ⚡" if is_improv else ""
+def fmt_free(s, news, sl_label):
+    se        = "🟢" if s["side"] == "BUY" else "🔴"
+    sf        = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo       = CAT_EMO.get(s["cat"], "📊")
+    improv_tag = " ⚡" if s.get("improv") else ""
+    sep       = "═" * 22
     return (
-        "{se} <b>SIGNAL {sf} — {name}</b>  {emo}{improv_tag}\n"+"═"*22+"\n"
+        "{se} <b>SIGNAL {sf} — {name}</b>  {emo}{improv_tag}\n" + sep + "\n"
         "📍 Entrée : <code>{entry}</code>\n"
         "✅ TP     : <code>{tp}</code>\n"
         "❌ SL     : <code>{sl}</code>\n"
-        "📐 RR : <b>1:{rr}</b>  ·  Score: <b>{score}/100</b>\n\n"
+        "📐 RR : <b>1:{rr}</b>  ·  Score : <b>{score}/100</b>\n\n"
         "💵 Lot 0.01 : <b>+${g001}</b>\n"
         "💰 Lot 1.00 : <b>+${g1}</b>\n\n"
-        "🔒 Analyse complète → PRO {}$ USDT\n"+"═"*22+"\n"
+        "🔒 Analyse complète → PRO {p}$ USDT\n" + sep + "\n"
         "🤖 AlphaBot  ·  @leaderodg_bot"
-    ).format(se=se,sf=sf,name=s["name"],emo=emo,improv_tag=improv_tag,
-             entry=s["entry"],tp=s["tp"],sl=s["sl"],rr=s["rr"],score=s["score"],
-             g001=s["g001"],g1=s["g1"],p=PRO_PRICE)
+    ).format(
+        se=se, sf=sf, name=s["name"], emo=emo, improv_tag=improv_tag,
+        entry=s["entry"], tp=s["tp"], sl=s["sl"], rr=s["rr"], score=s["score"],
+        g001=s["g001"], g1=s["g1"], p=PRO_PRICE
+    )
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     st=daily_stats(); ch=chal_get(); reg=AI_REG
