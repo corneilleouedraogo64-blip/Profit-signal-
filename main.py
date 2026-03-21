@@ -62,6 +62,13 @@ MARKETS = [
 ]
 CAT_EMO = {"FOREX":"💱","METALS":"🥇","CRYPTO":"₿","INDICES":"📈","OIL":"🛢"}
 PAIR_MAX_LEV = {"BTCUSDT":125,"ETHUSDT":100,"SOLUSDT":50,"BNBUSDT":75,"XRPUSDT":50}
+# ── Alias constantes v13 (rétrocompatibilité) ─────────────────────
+INACTIF_DAYS     = 3
+DATA_MAX_AGE_MIN = DATA_MAX_AGE
+BOT_USERNAME     = BOT_USER
+PRO_PROMO        = PRO_PRICE
+NB_AGENTS        = 20
+
 
 # ══════════════════════════════════════════════════════
 #  LOGGER
@@ -1350,9 +1357,16 @@ def verify_tx(tx):
                 if attempt==0: time.sleep(2)
     return False,0
 
-def handle_pay_submitted(uid,uname):
-    _pay_state[uid]={"tx":None,"step":"waiting"}
-    tg_send(uid,"📋 <b>COLLE TON TX HASH</b>\n\nAprès virement USDT TRC20, envoie l'ID transaction ici.\n\n<code>exemple: a1b2c3d4e5...</code>\n\n✅ Vérification automatique blockchain!",kb={"inline_keyboard":[[{"text":"❌ Annuler","callback_data":"pay_cancel"}]]})
+def handle_pay_submitted(uid, uname, plan_key="PRO"):
+    _pay_state[uid]={"tx":None,"step":"waiting","plan":plan_key}
+    price = {"FREE":0,"STARTER":5,"PRO":10,"VIP":25}.get(plan_key, PRO_PRICE)
+    tg_send(uid,
+        "📋 <b>COLLE TON TX HASH</b>\n\n"
+        "Plan: <b>{}</b> — {}$ USDT TRC20\n\n"
+        "Après virement, envoie l'ID de transaction ici.\n\n"
+        "<code>exemple: a1b2c3d4e5f6789abc...</code>\n\n"
+        "✅ Vérification automatique blockchain!".format(plan_key, price),
+        kb={"inline_keyboard":[[{"text":"❌ Annuler","callback_data":"pay_cancel"}]]})
 
 def handle_proof(uid,uname,tx):
     if uid not in _pay_state or _pay_state[uid].get("step")!="waiting": return False
