@@ -643,28 +643,28 @@ def improv_analyze(m, b, h1, m5, sn, news_ok):
         # EMA Bounce : prix au-dessus EMA20 qui rebondit dessus
         if ema8 > ema20 and abs(last - ema20) / ema20 < 0.003:
             mode_name = "EMA_BOUNCE"; side = "BUY"
-            sl = ema20 - a * 1.2; tp = last + (last - sl) * 3.0; sc = 48
+            sl = ema20 - a * 1.2; tp = last + (last - sl) * 3.0; sc = 72
         # Momentum : 3 bougies vertes consécutives + volume
         elif all(m5[-i]["c"]>m5[-i]["o"] for i in range(1,4)):
             mode_name = "MOMENTUM"; side = "BUY"
             sl = min(x["l"] for x in m5[-5:]) * 0.999
-            tp = last + (last - sl) * 3.0; sc = 42
+            tp = last + (last - sl) * 3.0; sc = 68
         # Structure H1 : prix au-dessus de la dernière clôture H1
         elif h1[-1]["c"] > h1[-2]["c"] and last > h1[-1]["c"] * 0.999:
             mode_name = "STRUCTURE_PLAY"; side = "BUY"
-            sl = h1[-1]["l"] * 0.999; tp = last + (last - sl) * 3.0; sc = 50
+            sl = h1[-1]["l"] * 0.999; tp = last + (last - sl) * 3.0; sc = 70
 
     elif b == "BEARISH":
         if ema8 < ema20 and abs(last - ema20) / ema20 < 0.003:
             mode_name = "EMA_BOUNCE"; side = "SELL"
-            sl = ema20 + a * 1.2; tp = last - (sl - last) * 3.0; sc = 48
+            sl = ema20 + a * 1.2; tp = last - (sl - last) * 3.0; sc = 72
         elif all(m5[-i]["c"]<m5[-i]["o"] for i in range(1,4)):
             mode_name = "MOMENTUM"; side = "SELL"
             sl = max(x["h"] for x in m5[-5:]) * 1.001
-            tp = last - (sl - last) * 3.0; sc = 42
+            tp = last - (sl - last) * 3.0; sc = 68
         elif h1[-1]["c"] < h1[-2]["c"] and last < h1[-1]["c"] * 1.001:
             mode_name = "STRUCTURE_PLAY"; side = "SELL"
-            sl = h1[-1]["h"] * 1.001; tp = last - (sl - last) * 3.0; sc = 50
+            sl = h1[-1]["h"] * 1.001; tp = last - (sl - last) * 3.0; sc = 70
 
     if not mode_name or not side: return None
 
@@ -672,12 +672,15 @@ def improv_analyze(m, b, h1, m5, sn, news_ok):
     gain = abs(tp - entry)
     if risk <= 0 or gain / risk < 3.0: return None  # RR min 3.0 pour improv
 
-    # Bonus session
+    # Bonus session (+0 à +10)
     sc += int(sess_qual * 10)
+
+    # Score minimum 75 obligatoire — sinon on n'improvise pas
+    if sc < 75: return None
 
     return {"improv": True, "mode": mode_name, "side": side,
             "entry": entry, "sl": sl, "tp": tp,
-            "rr": round(gain/risk,1), "score": min(sc,75),
+            "rr": round(gain/risk,1), "score": sc,
             "risk_mult": 0.5}  # risque réduit de 50% en mode improv
 
 # ══════════════════════════════════════════════════════
@@ -695,6 +698,102 @@ def news_check():
             except: pass
         return True,"✅ OK"
     except: return True,"✅ OK"
+
+
+# ══════════════════════════════════════════════════════
+#  🌊 AGENT LIQUIDITÉ — Condition OBLIGATOIRE
+# ══════════════════════════════════════════════════════
+# Avant tout signal, on vérifie que le prix a PRIS de la liquidité.
+# Sans ça = signal refusé. Aucune exception.
+#
+# 3 types de prise de liquidité détectés :
+#   1. SWEEP      : franchissement d'un swing high/low récent + retour
+#   2. STOP_HUNT  : spike rapide + rejet violent (wick > 2×corps)
+#   3. EQH_EQL    : Equal Highs ou Equal Lows touchés (pool de liquidité)
+
+def agent_liquidity(candles, bias, lookback=40):
+    """
+    Retourne un dict décrivant la prise de liquidité ou None si pas détectée.
+    {
+      "type"  : "SWEEP" | "STOP_HUNT" | "EQH_EQL",
+      "level" : float,        # niveau de liquidité touché
+      "score" : int,          # bonus score (+10 à +25)
+      "label" : str,          # texte affiché dans le message signal
+    }
+    """
+    if not candles or len(candles) < 10:
+        return None
+
+    c     = candles[-lookback:] if len(candles) > lookback else candles
+    last  = c[-1]
+    lp    = last["c"]
+    a     = atr(candles)
+
+    # ── 1. SWEEP : franchissement swing récent + retour dans le range ──
+    highs = [x["h"] for x in c[:-3]]
+    lows  = [x["l"] for x in c[:-3]]
+    if highs and lows:
+        prev_hh = max(highs)  # plus haut récent
+        prev_ll = min(lows)   # plus bas récent
+        cur_h   = last["h"]; cur_l = last["l"]
+
+        if bias == "BULLISH" and cur_l < prev_ll and lp > prev_ll:
+            # Prix a cassé le plus bas → swept les longs stops → remonte
+            return {"type":"SWEEP", "level":round(prev_ll,5),
+                    "score":20, "label":"Sweep LL ✓"}
+
+        if bias == "BEARISH" and cur_h > prev_hh and lp < prev_hh:
+            # Prix a cassé le plus haut → swept les short stops → redescend
+            return {"type":"SWEEP", "level":round(prev_hh,5),
+                    "score":20, "label":"Sweep HH ✓"}
+
+    # ── 2. STOP HUNT : spike + rejet violent (wick long = 2× corps min) ─
+    for i in range(-1, -min(5, len(c)), -1):
+        cv = c[i]
+        body   = abs(cv["c"] - cv["o"])
+        if body < a * 0.05:
+            continue  # doji, ignorer
+        if bias == "BULLISH":
+            lower_wick = cv["o"] - cv["l"] if cv["c"] >= cv["o"] else cv["c"] - cv["l"]
+            if lower_wick > body * 2.0 and cv["c"] > cv["o"]:
+                return {"type":"STOP_HUNT", "level":round(cv["l"], 5),
+                        "score":18, "label":"Stop Hunt bas ✓"}
+        else:
+            upper_wick = cv["h"] - cv["o"] if cv["c"] <= cv["o"] else cv["h"] - cv["c"]
+            if upper_wick > body * 2.0 and cv["c"] < cv["o"]:
+                return {"type":"STOP_HUNT", "level":round(cv["h"], 5),
+                        "score":18, "label":"Stop Hunt haut ✓"}
+
+    # ── 3. EQH / EQL : pool de liquidité externe touché ─────────────────
+    tol   = 0.0004
+    highs2 = [x["h"] for x in c]
+    lows2  = [x["l"] for x in c]
+    # Chercher deux highs très proches (Equal Highs) touchés par la bougie actuelle
+    if bias == "BEARISH":
+        eq_highs = []
+        for i in range(len(highs2) - 2):
+            for j in range(i + 1, len(highs2) - 1):
+                if highs2[i] > 0 and abs(highs2[i] - highs2[j]) / highs2[i] <= tol:
+                    eq_highs.append(max(highs2[i], highs2[j]))
+        if eq_highs:
+            eqh = max(eq_highs)
+            if last["h"] >= eqh * (1 - tol) and lp < eqh:
+                return {"type":"EQH_EQL", "level":round(eqh, 5),
+                        "score":15, "label":"EQH prise ✓"}
+
+    if bias == "BULLISH":
+        eq_lows = []
+        for i in range(len(lows2) - 2):
+            for j in range(i + 1, len(lows2) - 1):
+                if lows2[i] > 0 and abs(lows2[i] - lows2[j]) / lows2[i] <= tol:
+                    eq_lows.append(min(lows2[i], lows2[j]))
+        if eq_lows:
+            eql = min(eq_lows)
+            if last["l"] <= eql * (1 + tol) and lp > eql:
+                return {"type":"EQH_EQL", "level":round(eql, 5),
+                        "score":15, "label":"EQL prise ✓"}
+
+    return None  # Pas de prise de liquidité détectée → signal refusé
 
 def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
     try:
@@ -729,6 +828,15 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
         if fvg_z:   sc=min(sc+15,115)
         if cc2>=2:  sc=min(sc+10,115)
 
+        # ── AGENT LIQUIDITÉ — condition OBLIGATOIRE ───
+        liq = agent_liquidity(m5, b)
+        if not liq:
+            # Pas de prise de liquidité → signal refusé, même si score OK
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,
+                   "reason":"No liquidity sweep","improv":False}); return
+        # Bonus score si liquidité confirmée
+        sc = min(sc + liq["score"], 115)
+
         a=atr(m5); a_pct=a/(m5[-1]["c"]+0.0001)
         s_min=score_min+(m.get("vol",3)-3)*2+min(4,int(a_pct*100*5))
 
@@ -753,12 +861,14 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
                         ptp=gain_net/pip; psl=(risk+sp_p)/pip  # pips nets
+                        badges_full = badges[:]
+                        if liq: badges_full.insert(0, liq["label"])
                         sig={"name":m["name"],"cat":m["cat"],"side":"BUY","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges),"time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "mode":"NORMAL","risk_mult":1.0}
+                             "badges":" · ".join(badges_full),"time":datetime.now(timezone.utc).strftime("%H:%M"),
+                             "liq":liq,"mode":"NORMAL","risk_mult":1.0}
             else:
                 sl=bb["top"]+buf+sp_p; risk=sl-e
                 if risk<=0 or risk>a*10: pass
@@ -773,12 +883,14 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
                         ptp=gain_net/pip; psl=(risk+sp_p)/pip
+                        badges_full = badges[:]
+                        if liq: badges_full.insert(0, liq["label"])
                         sig={"name":m["name"],"cat":m["cat"],"side":"SELL","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges),"time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "mode":"NORMAL","risk_mult":1.0}
+                             "badges":" · ".join(badges_full),"time":datetime.now(timezone.utc).strftime("%H:%M"),
+                             "liq":liq,"mode":"NORMAL","risk_mult":1.0}
 
         # ── MODE IMPROVISATION : uniquement après 500 cycles sans signal ICT ──
         if not sig and improv_unlocked:
@@ -1127,45 +1239,73 @@ MODE_LABELS = {
     "OB":"Order Block","LIQ":"Liquidity Sweep",
 }
 
+def _score_label(sc):
+    """Retourne une évaluation textuelle du score de confiance."""
+    if sc >= 90: return "🔥 ÉLITE"
+    if sc >= 80: return "💎 PREMIUM"
+    if sc >= 70: return "✅ SOLIDE"
+    if sc >= 60: return "📊 CORRECT"
+    return "⚠️ FAIBLE"
+
+def _confidence_bar(sc):
+    filled = sc // 10
+    return "█" * filled + "░" * (10 - filled) + f"  {sc}/100"
+
 def fmt_pro(s, news, sl_label):
-    se         = "🟢" if s["side"] == "BUY" else "🔴"
-    sf         = "ACHAT" if s["side"] == "BUY" else "VENTE"
-    emo        = CAT_EMO.get(s["cat"], "📊")
-    mode_lbl   = MODE_LABELS.get(s["mode"], "?")
-    is_improv  = s.get("improv", False)
-    improv_warn = "\n⚡ <b>Mode Improvisation</b> — Setup allégé (risque 50%)" if is_improv else ""
-    bar        = "█" * (s["score"] // 10) + "░" * (10 - s["score"] // 10)
-    sep        = "═" * 22
-    news_lbl   = "✅ OK" if "✅" in news else "⚠️ Actif"
-    sp_s       = "✅ OK" if s["sp"] < 3 else "⚠️ Large"
+    se       = "🟢" if s["side"] == "BUY" else "🔴"
+    arrow    = "📈" if s["side"] == "BUY" else "📉"
+    sf       = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo      = CAT_EMO.get(s["cat"], "📊")
+    mode_lbl = MODE_LABELS.get(s["mode"], "?")
+    liq      = s.get("liq") or {}
+    liq_line = f'💧 Liquidité : <b>{liq.get("label","—")}</b>  (niveau {liq.get("level","—")})' if liq else ""
+    is_improv= s.get("improv", False)
+    bar      = _confidence_bar(s["score"])
+    sc_lbl   = _score_label(s["score"])
+    news_lbl = "✅ Calme" if "✅" in news else "⚠️ Actif"
+    sp_s     = "✅ OK" if s["sp"] < 3 else "⚠️ Large"
+    sep      = "═" * 24
+
+    # ── Phrase d'accroche selon le score ────────────────────────────
+    if s["score"] >= 85:
+        hook = "🔥 <b>Setup PREMIUM — Confluence maximale</b>"
+    elif s["score"] >= 75:
+        hook = "💎 <b>Setup de haute qualité — ICT confirmé</b>"
+    else:
+        hook = "📊 <b>Setup valide — Conditions réunies</b>"
+    if is_improv:
+        hook = "⚡ <b>Mode Improvisation — Setup allégé</b>"
+
     lines = [
-        f'{se} <b>SIGNAL PRO {sf} — {s["name"]}</b>  {emo}',
+        f"{arrow} {se} <b>SIGNAL PRO {sf} · {s['name']}</b>  {emo}",
         sep,
-        f'🕐 {s["time"]} UTC  ·  {sl_label}',
-        improv_warn,
+        hook,
+        liq_line,
+        f"🕐 {s['time']} UTC  ·  {sl_label}",
         "",
-        "🎯 <b>NIVEAUX</b>",
-        f'  Entrée : <code>{s["entry"]}</code>',
-        f'  TP     : <code>{s["tp"]}</code>  ✅',
-        f'  SL     : <code>{s["sl"]}</code>  ❌',
-        f'  RR     : <b>1:{s["rr"]}</b>',
+        "┌─ <b>NIVEAUX</b> ──────────────────",
+        f"│  📍 Entrée : <code>{s['entry']}</code>",
+        f"│  ✅ TP     : <code>{s['tp']}</code>",
+        f"│  ❌ SL     : <code>{s['sl']}</code>",
+        f"│  📐 RR     : <b>1:{s['rr']}</b>",
+        "└───────────────────────────",
         "",
-        "💵 <b>GAINS ESTIMÉS</b>",
-        f'  Lot 0.01 → <b>+${s["g001"]}</b>  /  -${s["l001"]}',
-        f'  Lot 1.00 → <b>+${s["g1"]}</b>  /  -${s["l1"]}  💰',
+        f"💵 Lot 0.01 : <b>+${s['g001']}</b> TP  /  <b>-${s['l001']}</b> SL",
+        f"💰 Lot 1.00 : <b>+${s['g1']}</b> TP  /  <b>-${s['l1']}</b> SL",
         "",
-        "🧠 <b>ANALYSE</b>",
-        f'  Tendance : <b>{s["bias"]}</b>  ({s["btype"]})',
-        f'  Mode     : <b>{mode_lbl}</b>',
-        f'  Score    : <b>{s["score"]}/100</b>  [{bar}]',
-        f'  {s.get("badges", "—")}',
+        "┌─ <b>ANALYSE IA</b> ─────────────────",
+        f"│  {sc_lbl}  [{bar}]",
+        f"│  Tendance : <b>{s['bias']}</b>  ({s['btype']})",
+        f"│  Mode     : <b>{mode_lbl}</b>",
+        f"│  {s.get('badges', '—')}",
+        "└───────────────────────────",
         "",
-        f'📋 News: {news_lbl}  ·  Spread: {sp_s}',
+        f"📰 News: {news_lbl}  ·  Spread: {sp_s}",
         sep,
-        "⚠️ Risk 1% max  ·  Not financial advice",
-        "🤖 AlphaBot PRO  ·  @leaderodg_bot",
+        "⚠️ Risk 1-2% max  ·  Not financial advice",
+        "🤖 <b>AlphaBot PRO</b>  ·  @leaderodg_bot",
     ]
-    return "\n".join(lines)
+    return "\n".join(l for l in lines if l is not None)
 
 def fmt_free(s, news, sl_label):
     se  = "🟢" if s["side"] == "BUY" else "🔴"
@@ -1200,23 +1340,36 @@ def fmt_free(s, news, sl_label):
             "🤖 AlphaBot  ·  @leaderodg_bot",
         ]
     else:
-        # ── Message signal ICT normal ────────────────────────────────
+        # ── Message signal ICT normal — style confiant ───────────────
+        liq      = s.get("liq") or {}
+        sc_lbl   = _score_label(s["score"])
+        arrow    = "📈" if s["side"] == "BUY" else "📉"
+        # Accroche selon score
+        if s["score"] >= 85:
+            hook = "🔥 Setup PREMIUM · Confluence maximale"
+        elif s["score"] >= 75:
+            hook = "💎 Setup qualité · ICT confirmé"
+        else:
+            hook = "📊 Setup validé · Conditions réunies"
+
         lines = [
-            f"{se} <b>SIGNAL {sf} — {s['name']}</b>  {emo}",
+            f"{arrow} {se} <b>{s['name']} — {sf}</b>  {emo}",
             sep,
+            f"<i>{hook}</i>",
+            f"💧 <b>{liq.get('label', 'Liquidité ✓')}</b>" if liq else "💧 Liquidité confirmée ✓",
+            "",
             f"📍 Entrée : <code>{s['entry']}</code>",
             f"✅ TP     : <code>{s['tp']}</code>",
             f"❌ SL     : <code>{s['sl']}</code>",
-            f"📐 RR : <b>1:{s['rr']}</b>  ·  Score : <b>{s['score']}/100</b>",
+            f"📐 RR : <b>1:{s['rr']}</b>  ·  {sc_lbl}",
             "",
-            f"💵 Lot 0.01 : <b>+${s['g001']}</b>",
-            f"💰 Lot 1.00 : <b>+${s['g1']}</b>",
+            f"💵 Lot 0.01 : <b>+${s['g001']}</b>  /  💰 Lot 1.00 : <b>+${s['g1']}</b>",
             "",
-            "🔒 Analyse complète → PRO " + str(PRO_PRICE) + "$ USDT",
-            sep,
-            "🤖 AlphaBot  ·  @leaderodg_bot",
+            "─" * 22,
+            "🔒 <b>Analyse complète PRO</b> → " + str(PRO_PRICE) + "$ USDT",
+            "📩 @leaderodg_bot  ·  🤖 AlphaBot",
         ]
-    return "\n".join(lines)
+    return "\n".join(l for l in lines if l is not None)
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     st=daily_stats(); ch=chal_get(); reg=AI_REG
@@ -1458,11 +1611,17 @@ def _scan_inner():
     for sig, key in sigs:
         msg_p = fmt_pro(sig, news_lbl, sl_l)
         msg_f = fmt_free(sig, news_lbl, sl_l)
-        # Si c'est un improv → envoyer sticker d'alerte en plus
+        # ── Sticker adapté au score et à la direction ───────────────
         if sig.get("improv"):
             stk = STK_FIRE if sig["side"] == "SELL" else STK_ROCKET
-            tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
-            time.sleep(0.3)
+        elif sig.get("score", 0) >= 85:
+            stk = STK_CROWN   # setup élite
+        elif sig.get("score", 0) >= 75:
+            stk = STK_MONEY if sig["side"] == "BUY" else STK_FIRE
+        else:
+            stk = STK_SIGNAL
+        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
+        time.sleep(0.3)
         r = tg_send(CHANNEL_ID, msg_f)
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
@@ -1573,12 +1732,24 @@ def check_open_sigs():
             except: continue
     except Exception as e: log("WARN","check_open: {}".format(e))
 
-def notify_result(pair,side,entry,tp,sl,result,cur):
-    icon="✅" if result=="TP" else "❌"; label="TP ATTEINT 💰" if result=="TP" else "SL TOUCHÉ ⚠️"
-    d="⬆️" if side=="BUY" else "⬇️"
-    msg="{} <b>RÉSULTAT — {}</b>  {}\n"+"━"*20+"\n<b>{}</b>\n📍Entrée:<code>{}</code>  Prix:<code>{}</code>\n✅TP:<code>{}</code>  ❌SL:<code>{}</code>\n🤖 AlphaBot  ·  @leaderodg_bot".format(icon,pair,d,label,entry,cur,tp,sl)
-    tg_send(CHANNEL_ID,msg)
-    for puid in pro_users(): tg_send(puid,msg); time.sleep(0.04)
+def notify_result(pair, side, entry, tp, sl, result, cur):
+    icon  = "✅" if result == "TP" else "❌"
+    label = "TP ATTEINT 💰" if result == "TP" else "SL TOUCHÉ ⚠️"
+    d     = "⬆️" if side == "BUY" else "⬇️"
+    sep   = "━" * 20
+    # NOTE: parenthèses obligatoires pour que .format() couvre TOUT le template
+    msg = (
+        f"{icon} <b>RÉSULTAT — {pair}</b>  {d}\n"
+        f"{sep}\n"
+        f"<b>{label}</b>\n"
+        f"📍 Entrée : <code>{entry}</code>\n"
+        f"📌 Prix   : <code>{cur}</code>\n"
+        f"✅ TP     : <code>{tp}</code>\n"
+        f"❌ SL     : <code>{sl}</code>\n"
+        f"🤖 AlphaBot  ·  @leaderodg_bot"
+    )
+    tg_send(CHANNEL_ID, msg)
+    for puid in pro_users(): tg_send(puid, msg); time.sleep(0.04)
 
 # ══════════════════════════════════════════════════════
 #  PAIEMENT USDT
