@@ -4,6 +4,7 @@
 AlphaBot PRO v10 — Agent IA Adaptatif
 • Bot Telegram FREE/PRO/VIP + paiement USDT auto
 • 20 marchés Forex/Métaux/Crypto/Indices/Pétrole
+• Cerveau ICT/SMC v2 + Analyse Multi-Timeframe
 • Si pas de setup parfait → l'agent allège les critères
   si tendance de fond + session + broker sont valides
 • Challenge IA 5$→500$ (Binance simulation)
@@ -30,7 +31,7 @@ DB_FILE      = "ab10.db"
 BINANCE_BASE = "https://fapi.binance.com/fapi/v1"
 
 PRO_PRICE  = 10;  REF_TARGET = 30;  REF_MONTHS = 3
-FREE_LIMIT = 2;   PRO_LIMIT  = 10;  NB_AGENTS  = 20
+FREE_LIMIT = 4;   PRO_LIMIT  = 20;  NB_AGENTS  = 20
 TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 30
 DAILY_HOUR = 20;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
 FEE_TAKER  = 0.0004
@@ -597,90 +598,6 @@ def ote_zone(sh,sl,bias):
 # ══════════════════════════════════════════════════════
 #  🧠 MODE IMPROVISATION — Le cœur du v10
 # ══════════════════════════════════════════════════════
-# Quand il n'y a pas de setup ICT parfait, l'agent improvise :
-# il allège les critères si 3 conditions fondamentales sont réunies :
-# 1. TENDANCE DE FOND valide (H1 bias clair)
-# 2. SESSION active (pas hors marché)
-# 3. BROKER OK (pas de spread trop large, pas de news)
-# → Il entre sur un setup "simplifié" avec risque réduit
-
-IMPROV_MODES = [
-    # (nom, description, risk_mult, score_required)
-    ("TREND_FOLLOW",  "Trend Following pur",    0.6, 40),
-    ("EMA_BOUNCE",    "Rebond EMA20",            0.5, 35),
-    ("RANGE_BREAK",   "Cassure de range",        0.5, 38),
-    ("MOMENTUM",      "Momentum directionnel",   0.55,36),
-    ("STRUCTURE_PLAY","Structure H1 simple",     0.65,42),
-]
-
-def improv_analyze(m, b, h1, m5, sn, news_ok):
-    """
-    Mode improvisation : génère un signal allégé si la tendance + session
-    sont valides, même sans setup ICT complet.
-    Retourne un signal ou None.
-    """
-    if b == "NEUTRAL": return None
-    if not news_ok: return None  # jamais sans news ok
-
-    last = m5[-1]["c"]
-    a    = atr(m5)
-    closes = [x["c"] for x in m5[-20:]]
-
-    # ── EMA 20 / 50 sur M5 ───────────────────────────
-    ema20 = sum(closes[-20:])/20 if len(closes)>=20 else closes[-1]
-    ema8  = sum(closes[-8:])/8   if len(closes)>=8  else closes[-1]
-    ema50 = sum([x["c"] for x in m5][-50:])/50 if len(m5)>=50 else ema20
-
-    # Broker check : spread et fraîcheur (déjà filtrés en amont)
-    # Session check
-    sess_qual = {"LONDON_KZ":1.0,"OVERLAP":1.0,"NY":0.9,"LONDON":0.8,"ASIAN":0.5,"WEEKEND":0.6,"OFF":0.0}.get(sn,0.5)
-    if sess_qual < 0.5: return None
-
-    mode_name = None; side = None; entry = last; sl = 0; tp = 0; sc = 0
-
-    if b == "BULLISH":
-        # EMA Bounce : prix au-dessus EMA20 qui rebondit dessus
-        if ema8 > ema20 and abs(last - ema20) / ema20 < 0.003:
-            mode_name = "EMA_BOUNCE"; side = "BUY"
-            sl = ema20 - a * 1.2; tp = last + (last - sl) * 3.0; sc = 72
-        # Momentum : 3 bougies vertes consécutives + volume
-        elif all(m5[-i]["c"]>m5[-i]["o"] for i in range(1,4)):
-            mode_name = "MOMENTUM"; side = "BUY"
-            sl = min(x["l"] for x in m5[-5:]) * 0.999
-            tp = last + (last - sl) * 3.0; sc = 68
-        # Structure H1 : prix au-dessus de la dernière clôture H1
-        elif h1[-1]["c"] > h1[-2]["c"] and last > h1[-1]["c"] * 0.999:
-            mode_name = "STRUCTURE_PLAY"; side = "BUY"
-            sl = h1[-1]["l"] * 0.999; tp = last + (last - sl) * 3.0; sc = 70
-
-    elif b == "BEARISH":
-        if ema8 < ema20 and abs(last - ema20) / ema20 < 0.003:
-            mode_name = "EMA_BOUNCE"; side = "SELL"
-            sl = ema20 + a * 1.2; tp = last - (sl - last) * 3.0; sc = 72
-        elif all(m5[-i]["c"]<m5[-i]["o"] for i in range(1,4)):
-            mode_name = "MOMENTUM"; side = "SELL"
-            sl = max(x["h"] for x in m5[-5:]) * 1.001
-            tp = last - (sl - last) * 3.0; sc = 68
-        elif h1[-1]["c"] < h1[-2]["c"] and last < h1[-1]["c"] * 1.001:
-            mode_name = "STRUCTURE_PLAY"; side = "SELL"
-            sl = h1[-1]["h"] * 1.001; tp = last - (sl - last) * 3.0; sc = 70
-
-    if not mode_name or not side: return None
-
-    risk = abs(entry - sl)
-    gain = abs(tp - entry)
-    if risk <= 0 or gain / risk < 2.5: return None  # RR min 2.5 pour improv
-
-    # Bonus session (+0 à +10)
-    sc += int(sess_qual * 10)
-
-    # Score minimum 55 — improvisation très agressive
-    if sc < 55: return None
-
-    return {"improv": True, "mode": mode_name, "side": side,
-            "entry": entry, "sl": sl, "tp": tp,
-            "rr": round(gain/risk,1), "score": sc,
-            "risk_mult": 0.5}  # risque réduit de 50% en mode improv
 
 # ══════════════════════════════════════════════════════
 #  AGENT ANALYZE PRINCIPAL
@@ -794,112 +711,144 @@ def agent_liquidity(candles, bias, lookback=40):
 
     return None  # Pas de prise de liquidité détectée → signal refusé
 
-def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
+def agent_analyze(m, score_min, news_ok, q):
+    """
+    Analyse multi-timeframe : H1 (tendance) + M15 (OB/structure) + M1 (entrée précise)
+    RR minimum : 3.0 — seulement les meilleurs setups
+    Confirmations obligatoires : biais H1 + OB M15 + liquidité
+    Optionnels (bonus score) : OTE, FVG, CHoCH, M1 confirmation
+    """
     try:
         sn,_,_,_=get_session()
+
+        # ── H1 : tendance de fond obligatoire ────────
         h1=fetch_c(m["sym"],"1h","30d") or fetch_c(m["sym"],"4h","60d")
         if not h1 or len(h1)<10:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"H1 insuffisant","improv":False}); return
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"H1 insuffisant"}); return
         b,bos,bt=detect_bias(h1)
         if b=="NEUTRAL":
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Neutre","improv":False}); return
-        time.sleep(0.1)
-        m5=fetch_c(m["sym"],"15m","10d") or fetch_c(m["sym"],"5m","5d")
-        if not m5 or len(m5)<10:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"M15 indispo","improv":False}); return
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Neutre"}); return
 
-        # ── Vérif spread ─────────────────────────────
-        last5=[abs(x["h"]-x["l"]) for x in m5[-5:] if x["h"]!=x["l"]]
+        # ── Confirmation tendance H1 (3 niveaux) ─────
+        # 1. CHoCH/BOS, 2. EMA trend, 3. Swing structure
+        cd2,cc2=choch_seq(h1)
+        h1_closes=[x["c"] for x in h1[-50:]]
+        h1_ema20=sum(h1_closes[-20:])/20 if len(h1_closes)>=20 else h1_closes[-1]
+        h1_ema50=sum(h1_closes[-50:])/50 if len(h1_closes)>=50 else h1_closes[-1]
+        trend_score=0
+        if cc2>=1: trend_score+=1   # CHoCH confirmé
+        if cc2>=2: trend_score+=1   # CHoCH fort
+        if b=="BULLISH" and h1_ema20>h1_ema50: trend_score+=1
+        if b=="BEARISH" and h1_ema20<h1_ema50: trend_score+=1
+        H_sw,L_sw=swings(h1,n=3)
+        if b=="BULLISH" and len(H_sw)>=2 and H_sw[-1][1]>H_sw[-2][1]: trend_score+=1
+        if b=="BEARISH" and len(L_sw)>=2 and L_sw[-1][1]<L_sw[-2][1]: trend_score+=1
+        # Tendance confirmée si au moins 1 critère (les autres sont bonus)
+        if trend_score==0:
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Tendance H1 faible"}); return
+
+        time.sleep(0.08)
+
+        # ── M15 : timeframe principal ─────────────────
+        m15=fetch_c(m["sym"],"15m","10d")
+        if not m15 or len(m15)<10:
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"M15 indispo"}); return
+
+        # ── M1 : confirmation entrée (optionnel) ──────
+        m1=fetch_c(m["sym"],"1m","2d")  # optionnel, pas bloquant
+
+        # ── Spread ────────────────────────────────────
+        last5=[abs(x["h"]-x["l"]) for x in m15[-5:] if x["h"]!=x["l"]]
         sp=round(min(last5)/m["pip"]*0.03,2) if last5 else 0
         if sp>m["max_sp"]*1.5:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Spread large","improv":False}); return
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Spread large"}); return
 
-        # ── OTE + FVG + CHoCH ────────────────────────
+        # ── Analyse M15 ────────────────────────────────
+        lp=m15[-1]["c"]
         sh_h1=max(x["h"] for x in h1[-50:]); sl_h1=min(x["l"] for x in h1[-50:])
-        lp=m5[-1]["c"]
         ote_lo,ote_hi=ote_zone(sh_h1,sl_h1,b)
         in_ote=bool(ote_lo and ote_hi and ote_lo<=lp<=ote_hi)
-        fvg_z=fvg(m5,b)
-        cd2,cc2=choch_seq(h1)
-        bbs=breakers(m5,b)
-        sc=conf_score(m5,b)
-        if in_ote:  sc=min(sc+12,115)
-        if fvg_z:   sc=min(sc+15,115)
-        if cc2>=2:  sc=min(sc+10,115)
+        fvg_z=fvg(m15,b)
+        bbs=breakers(m15,b)  # Order Blocks M15 — obligatoire
+        sc=conf_score(m15,b)
 
-        # ── AGENT LIQUIDITÉ — condition OBLIGATOIRE ───
-        liq = agent_liquidity(m5, b)
+        # ── Bonus score confirmations optionnelles ────
+        if in_ote:       sc=min(sc+12,115)  # OTE Fibonacci
+        if fvg_z:        sc=min(sc+15,115)  # Fair Value Gap
+        if cc2>=2:       sc=min(sc+10,115)  # CHoCH fort H1
+        if trend_score>=3: sc=min(sc+8,115) # 3+ confirmations tendance
+
+        # ── M1 bonus : confirmation sur petite TF ─────
+        if m1 and len(m1)>=5:
+            m1_bias,_,_=detect_bias(m1[-30:] if len(m1)>=30 else m1)
+            if m1_bias==b: sc=min(sc+10,115)  # M1 aligné avec H1
+
+        # ── Liquidité : condition OBLIGATOIRE ─────────
+        liq=agent_liquidity(m15,b)
         if not liq:
-            # Pas de prise de liquidité → signal refusé, même si score OK
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,
-                   "reason":"No liquidity sweep","improv":False}); return
-        # Bonus score si liquidité confirmée
-        sc = min(sc + liq["score"], 115)
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"No liquidity sweep"}); return
+        sc=min(sc+liq["score"],115)
 
-        a=atr(m5); a_pct=a/(m5[-1]["c"]+0.0001)
-        s_min=score_min+(m.get("vol",3)-3)*2+min(4,int(a_pct*100*5))
+        a=atr(m15); a_pct=a/(lp+0.0001)
+        s_min=score_min+(m.get("vol",3)-3)*2
 
-        sig = None
+        sig=None
 
-        # ── MODE NORMAL : setup ICT complet ──────────
-        if bbs and sc>=s_min and (news_ok or sc>=s_min+8):
-            bb=bbs[0]; e=lp; buf=a*0.15; sp_p=sp*m["pip"]
-            eq_h,eq_l=eqh_eql(m5)
+        # ── SETUP : OB M15 obligatoire ────────────────
+        if bbs and sc>=s_min and (news_ok or sc>=s_min+5):
+            bb=bbs[0]; e=lp; buf=a*0.12; sp_p=sp*m["pip"]
+            eq_h,eq_l=eqh_eql(m15)
             if b=="BULLISH":
                 sl=bb["bottom"]-buf-sp_p; risk=e-sl
-                if risk<=0 or risk>a*10: pass
-                else:
-                    tp=(eq_h*0.9995) if (eq_h and e<eq_h<e+risk*5) else e+risk*2.5
-                    gain_brut=abs(tp-e); gain_net=gain_brut-sp_p
-                    # RR net : spread déduit du gain ET ajouté au risque
+                if risk>0 and risk<=a*12:
+                    # TP : vise EQH si proche, sinon RR 3.0 minimum
+                    tp_eq=(eq_h*0.9995) if (eq_h and e<eq_h<e+risk*6) else None
+                    tp=tp_eq if tp_eq else e+risk*3.0
+                    gain_net=abs(tp-e)-sp_p
                     rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=2.0:  # seuil 2.0 (2.5 avec spread inclus ≈ 2.0 net)
-                        badges=[]
-                        if in_ote: badges.append("OTE ✓")
-                        if fvg_z: badges.append("FVG ✓")
-                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                    if rr>=3.0:  # RR MINIMUM 3.0
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                        ptp=gain_net/pip; psl=(risk+sp_p)/pip  # pips nets
-                        badges_full = badges[:]
-                        if liq: badges_full.insert(0, liq["label"])
+                        ptp=gain_net/pip; psl=(risk+sp_p)/pip
+                        badges=[liq["label"]]
+                        if in_ote: badges.append("OTE ✓")
+                        if fvg_z:  badges.append("FVG ✓")
+                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                        tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
                         sig={"name":m["name"],"cat":m["cat"],"side":"BUY","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges_full),"time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"NORMAL","risk_mult":1.0}
+                             "badges":" · ".join(badges)+"  📊 "+tf_tag,
+                             "time":datetime.now(timezone.utc).strftime("%H:%M"),
+                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0}
             else:
                 sl=bb["top"]+buf+sp_p; risk=sl-e
-                if risk<=0 or risk>a*10: pass
-                else:
-                    tp=(eq_l*1.0005) if (eq_l and e-risk*5<eq_l<e) else e-risk*2.5
-                    gain_brut=abs(tp-e); gain_net=gain_brut-sp_p
+                if risk>0 and risk<=a*12:
+                    tp_eq=(eq_l*1.0005) if (eq_l and e-risk*6<eq_l<e) else None
+                    tp=tp_eq if tp_eq else e-risk*3.0
+                    gain_net=abs(tp-e)-sp_p
                     rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=2.0:
-                        badges=[]
-                        if in_ote: badges.append("OTE ✓")
-                        if fvg_z: badges.append("FVG ✓")
-                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                    if rr>=3.0:  # RR MINIMUM 3.0
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
                         ptp=gain_net/pip; psl=(risk+sp_p)/pip
-                        badges_full = badges[:]
-                        if liq: badges_full.insert(0, liq["label"])
+                        badges=[liq["label"]]
+                        if in_ote: badges.append("OTE ✓")
+                        if fvg_z:  badges.append("FVG ✓")
+                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                        tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
                         sig={"name":m["name"],"cat":m["cat"],"side":"SELL","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
                              "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges_full),"time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"NORMAL","risk_mult":1.0}
-
-        # Improvisation supprimée
+                             "badges":" · ".join(badges)+"  📊 "+tf_tag,
+                             "time":datetime.now(timezone.utc).strftime("%H:%M"),
+                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0}
 
         if sig:
-            q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,
-                   "improv":sig.get("improv",False)})
+            q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,"improv":False})
         else:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,
-                   "reason":"Score {}/{}{}".format(sc,s_min," — improv impossible" if not news_ok else ""),
-                   "improv":False})
+            reason="RR<3.0" if bbs and sc>=s_min else "Score {}/{}".format(sc,s_min) if not bbs else "No OB M15"
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":reason,"improv":False})
     except Exception as ex:
         q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":str(ex)[:40],"improv":False})
 
@@ -1233,7 +1182,6 @@ def fmt_pro(s, news, sl_label):
     mode_lbl = MODE_LABELS.get(s["mode"], "?")
     liq      = s.get("liq") or {}
     liq_line = f'💧 Liquidité : <b>{liq.get("label","—")}</b>  (niveau {liq.get("level","—")})' if liq else ""
-    is_improv= s.get("improv", False)
     bar      = _confidence_bar(s["score"])
     sc_lbl   = _score_label(s["score"])
     news_lbl = "✅ Calme" if "✅" in news else "⚠️ Actif"
@@ -1247,8 +1195,6 @@ def fmt_pro(s, news, sl_label):
         hook = "💎 <b>Setup de haute qualité — ICT confirmé</b>"
     else:
         hook = "📊 <b>Setup valide — Conditions réunies</b>"
-    if is_improv:
-        hook = "⚡ <b>Mode Improvisation — Setup allégé</b>"
 
     lines = [
         f"{arrow} {se} <b>SIGNAL PRO {sf} · {s['name']}</b>  {emo}",
@@ -1293,8 +1239,6 @@ def fmt_free(s, news, sl_label):
         hook = "🔥 <b>Setup PREMIUM — Score élite</b>"
     elif s["score"] >= 75:
         hook = "💎 <b>Setup ICT confirmé — Haute confiance</b>"
-    elif s.get("improv"):
-        hook = "⚡ <b>Setup allégé — Mode Improvisation</b>"
     else:
         hook = "📊 <b>Setup valide — Conditions réunies</b>"
 
@@ -1313,8 +1257,8 @@ def fmt_free(s, news, sl_label):
         "",
         sep,
         "🚨 <b>Tu vois ce signal FREE ?</b>",
-        f"Les membres PRO en reçoivent <b>10/jour</b> comme ça.",
-        f"Toi tu en as droit à <b>{FREE_LIMIT} seulement.</b> 😬",
+        f"Les membres PRO en reçoivent <b>jusqu'à 20/jour</b> comme ça.",
+        f"Toi tu en as droit à seulement <b>{FREE_LIMIT}</b>. 😬",
         "",
         "⏳ Pendant que tu attends ton prochain signal,",
         "<b>les PRO exécutent déjà les suivants.</b>",
@@ -1328,12 +1272,10 @@ def fmt_free(s, news, sl_label):
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     st=daily_stats(); ch=chal_get(); reg=AI_REG
-    improv_count=sum(1 for r in results if r.get("improv"))
     lines=["🔍 <b>SCAN {} UTC</b>  ·  {}".format(scan_t,sl_l),
            "🎯 Score min:<b>{}</b>  ·  News:{}".format(sm,"✅" if "✅" in news else "⚠️"),
            "💵 Confirmés: <b>+${}</b>  ·  {}✅ {}❌ {}🔄 ({} signaux)".format(st["g1"],st["wins"],st["losses"],st.get("open",0),st["n"]),
-           "🤖 IA: <b>{:.4f}$</b>  ·  Régime: {}".format(ch["balance"],reg.get("regime","?")),
-           "⚡ Improv: {} signal(s) allégé(s)".format(improv_count) if improv_count else "",""]
+           "🤖 IA: <b>{:.4f}$</b>  ·  Régime: {}".format(ch["balance"],reg.get("regime","?")),""]
     cats={}
     for r in results: cats.setdefault(r.get("cat","?"),[]).append(r)
     for cat in ["METALS","CRYPTO","FOREX","INDICES","OIL"]:
@@ -1342,7 +1284,7 @@ def fmt_scan(results,news,scan_t,sl_l,sm,nb):
         for r in cats[cat]:
             if r["found"]:
                 s=r["signal"]; se="🟢" if s["side"]=="BUY" else "🔴"
-                tag=" ⚡" if r.get("improv") else ""
+                tag=""
                 lines.append("  {} <b>{}</b>  {}{}  RR 1:{}  {}/100".format(se,r["name"],s["side"],tag,s["rr"],s["score"]))
                 lines.append("  📍<code>{}</code>→TP<code>{}</code> SL<code>{}</code>".format(s["entry"],s["tp"],s["sl"]))
             else:
@@ -1351,50 +1293,82 @@ def fmt_scan(results,news,scan_t,sl_l,sm,nb):
     lines+=["═"*22,"🟢 <b>{} signal(s)</b>".format(nb) if nb else "🟡 Aucun signal","🔄 Prochain scan ~{}s".format(SCAN_SEC)]
     return "\n".join(lines)
 
-def fmt_daily(st):
+def fmt_daily(st, is_pro=True):
+    """
+    Rapport de fin de journée envoyé à TOUS les membres.
+    Version FREE : résumé + motivation PRO.
+    Version PRO  : détail complet de chaque position.
+    """
     if st["n"] == 0:
-        return "📊 <b>RAPPORT {}</b>\n\nAucun signal.".format(st["date"])
+        return None  # Rien à rapporter
+
     closed = st["wins"] + st["losses"]
-    wr = int(st["wins"] / closed * 100) if closed > 0 else 0
-    ch = chal_get()
-    improv_sigs = db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'", (st["date"] + "%",))
-    improv_count = improv_sigs[0][0] if improv_sigs else 0
-    perf = "🔥🔥" if st["g1"] > 2000 else "🔥" if st["g1"] > 1000 else "💰"
-    sep = "═" * 22
-    lines = [
-        f"📯 <b>RAPPORT DU JOUR — AlphaBot PRO</b> {perf}",
-        sep,
-        f"📅 {st['date']}  ·  {st['n']} signaux envoyés",
-        f"✅ TP confirmés : <b>{st['wins']}</b>  ·  ❌ SL : <b>{st['losses']}</b>  ·  🔄 En cours : <b>{st['open']}</b>",
-        f"📊 Win rate réel : <b>{wr}%</b>" if closed > 0 else "📊 Win rate : <b>En attente résultats</b>",
-        f"💵 Lot 0.01 confirmé : <b>+${st['g001']}</b>  · potentiel +${st['pot_g001']}",
-        f"💰 Lot 1.00 confirmé : <b>+${st['g1']}</b>  · potentiel +${st['pot_g1']}",
-        "⚡ Dont {} signal(s) improvisation".format(improv_count) if improv_count else "",
-        "",
-        f"🤖 <b>IA Challenge: {ch['balance']:.4f}$</b>  AM:{ch['am_cycle']}/4",
-        "",
-        "━" * 20,
-        "",
-    ]
-    for row in st["rows"]:
-        pair, side, rr, g001, g1, l001, l1, sess, mode, result = row
-        d = "⬆️" if side == "BUY" else "⬇️"
-        improv_tag = " ⚡" if mode != "NORMAL" else ""
-        if result == "TP":
-            icon = "✅"; detail = f"+${g1:.0f} (lot 1)"
-        elif result == "SL":
-            icon = "❌"; detail = f"-${l1:.0f} (lot 1)"
-        else:
-            icon = "🔄"; detail = "en cours..."
-        lines.append(f"{icon} <b>{pair}</b>{improv_tag} {d} {'ACHAT' if side=='BUY' else 'VENTE'} — RR <b>1:{rr}</b>  {detail}")
-    lines += [
-        "",
-        sep,
-        f"💰 Total confirmé lot 1.00 : <b>+${st['g1']}</b>",
-        f"🔄 Potentiel en cours      : <b>+${st['pot_g1']}</b>",
-        f"📩 @leaderodg_bot  ·  {PRO_PRICE}$ USDT",
-        "⚠️ Gains confirmés = TP atteints réels. Not financial advice.",
-    ]
+    wr     = int(st["wins"] / closed * 100) if closed > 0 else 0
+    perf   = "🔥🔥" if st["g1"] > 2000 else "🔥" if st["g1"] > 1000 else "💰"
+    sep    = "═" * 22
+
+    if is_pro:
+        # ── VERSION PRO : rapport complet ──────────────
+        lines = [
+            f"📯 <b>RAPPORT DU JOUR — AlphaBot PRO v10</b> {perf}",
+            sep,
+            f"📅 {st['date']}",
+            f"📡 <b>{st['n']}</b> signaux analysés  ·  M1+M15+H1",
+            "",
+            f"✅ TP : <b>{st['wins']}</b>  ·  ❌ SL : <b>{st['losses']}</b>  ·  🔄 En cours : <b>{st['open']}</b>",
+            f"📊 Win rate : <b>{wr}%</b>" if closed > 0 else "📊 Win rate : en attente",
+            "",
+            f"💵 Lot 0.01 : <b>+${st['g001']}</b>  (confirmé)   potentiel : +${st['pot_g001']}",
+            f"💰 Lot 1.00 : <b>+${st['g1']}</b>  (confirmé)   potentiel : +${st['pot_g1']}",
+            "",
+            "━" * 20,
+            "<b>DÉTAIL DES POSITIONS :</b>",
+            "",
+        ]
+        total_001 = 0.0
+        for row in st["rows"]:
+            pair, side, rr, g001, g1, l001, l1, sess, mode, result = row
+            d = "⬆️" if side == "BUY" else "⬇️"
+            if result == "TP":
+                icon = "✅"; detail = f"<b>+${g001:.2f}</b> (lot 0.01)  /  <b>+${g1:.0f}</b> (lot 1)"
+                total_001 += g001
+            elif result == "SL":
+                icon = "❌"; detail = f"<b>-${l001:.2f}</b> (lot 0.01)  /  <b>-${l1:.0f}</b> (lot 1)"
+                total_001 -= l001
+            else:
+                icon = "🔄"; detail = f"en cours — potentiel +${g001:.2f} (lot 0.01)"
+            lines.append(f"{icon} <b>{pair}</b> {d} {'ACHAT' if side=='BUY' else 'VENTE'} · RR 1:{rr}  →  {detail}")
+        lines += [
+            "",
+            "━" * 20,
+            f"💵 Net estimé lot 0.01 : <b>{total_001:+.2f}$</b>",
+            f"💰 Net estimé lot 1.00 : <b>{round(total_001*100, 0):+.0f}$</b>",
+            "",
+            sep,
+            "⚠️ Estimations basées sur TP/SL détectés. Not financial advice.",
+            "🤖 AlphaBot PRO v10  ·  @leaderodg_bot",
+        ]
+    else:
+        # ── VERSION FREE : résumé + motivation ─────────
+        lines = [
+            f"📊 <b>RÉSULTATS DU JOUR — AlphaBot PRO v10</b> {perf}",
+            sep,
+            f"📅 {st['date']}  ·  <b>{st['n']}</b> signaux envoyés",
+            "",
+            f"✅ <b>{st['wins']}</b> TP atteints  ·  ❌ <b>{st['losses']}</b> SL  ·  Win rate : <b>{wr}%</b>",
+            "",
+            f"💵 Lot 0.01 : <b>+${st['g001']}</b> de gains estimés",
+            f"💰 Lot 1.00 : <b>+${st['g1']}</b> de gains estimés",
+            "",
+            sep,
+            "🔒 <b>Tu n\'as vu que 4 signaux aujourd\'hui.</b>",
+            f"Les membres PRO ont reçu <b>{st['n']}</b> signaux + le détail complet.",
+            "",
+            f"💎 <b>Passe PRO — {PRO_PRICE}$ USDT</b> et ne rate plus rien.",
+            "👉 @leaderodg_bot  →  /pay",
+            sep,
+            "🤖 AlphaBot PRO v10  ·  @leaderodg_bot",
+        ]
     return "\n".join(l for l in lines if l is not None)
 
 # ══════════════════════════════════════════════════════
@@ -1403,10 +1377,7 @@ def fmt_daily(st):
 _sent=set(); _sent_lk=threading.Lock()
 _last_d=""; _last_w=""; _scan_run=False; _scan_lock=threading.Lock(); _test_mode=""
 _last_results=[]; _pay_state={}
-# ── Compteur improv ──────────────────────────────────────────────────
-_cycles_no_signal = 0          # cycles consécutifs sans aucun signal ICT
-IMPROV_UNLOCK_CYCLES = 0       # ⚡ Improvisation TOUJOURS active (seuil = 0)
-_improv_cd = {}                # {pair_name: timestamp} cooldown par paire
+_cycles_no_signal = 0
 # v13 compat aliases
 _sent_lock         = _sent_lk
 _last_daily        = _last_d
@@ -1475,7 +1446,6 @@ def _send_session_report(sess_label, end_hour):
         wr = round(wins / len(rows) * 100) if rows else 0
         total_g001 = round(sum(r[3] for r in rows), 2)
         total_g1   = round(sum(r[4] for r in rows), 2)
-        improv = sum(1 for r in rows if r[7] != "NORMAL")
         perf = "🔥" if total_g1 > 500 else "💰" if total_g1 > 100 else "📊"
         sep = "=" * 22
         msg = (
@@ -1489,8 +1459,7 @@ def _send_session_report(sess_label, end_hour):
             sess_label, perf, end_hour,
             len(rows), wins, losses, wr,
             total_g001, total_g1,
-            "⚡ {} signal(s) improvisation".format(improv) if improv else ""
-        )
+            )
         # Détail trades
         sep2 = "=" * 22
         for row in rows:
@@ -1529,18 +1498,15 @@ def _scan_inner():
     hs     = now.strftime("%H");    wd = now.weekday()
     sn, sm, sl_l, wknd = get_session()
     sm = get_adaptive_score_min()
-    # Improv autorisé seulement après IMPROV_UNLOCK_CYCLES cycles sans signal ICT
-    improv_unlocked = False  # Improvisation désactivée
-    log("INFO", clr("Scan {} — {} — Score~{} | No-sig cycles: {}/{}{}".format(
-        scan_t, sl_l, sm, _cycles_no_signal, IMPROV_UNLOCK_CYCLES,
-        " ⚡IMPROV OK" if improv_unlocked else ""), "d"))
+
+    log("INFO", clr("Scan {} — {} — Score~{}".format(scan_t, sl_l, sm), "d"))
     news_ok, news_lbl = news_check()
     active = [m for m in MARKETS if not wknd or m.get("crypto", False)]
     q = Queue(); threads = []
     for m in active:
-        # On passe improv_unlocked à agent_analyze
+        # On passe False à agent_analyze
         t = threading.Thread(target=agent_analyze,
-                             args=(m, sm, news_ok, q, improv_unlocked), daemon=True)
+                             args=(m, sm, news_ok, q), daemon=True)
         t.start(); threads.append(t)
     for t in threads: t.join(timeout=15)
     raw = {}
@@ -1555,13 +1521,7 @@ def _scan_inner():
     with _sent_lk: sigs = [(s, k) for s, k in sigs if k not in _sent]
     sigs.sort(key=lambda x: -x[0]["score"])
 
-    # ── Mise à jour compteur cycles ────────────────────────────────
-    # On compte uniquement les signaux ICT vrais (non improv)
-    ict_sigs = [s for s, k in sigs if not s.get("improv")]
-    if ict_sigs:
-        _cycles_no_signal = 0   # reset : un vrai signal ICT trouvé
-    else:
-        _cycles_no_signal += 1  # aucun signal ICT → on incrémente
+
 
     pru     = pro_users(); fru = free_users()
     pru_eff = [u for u in pru if not (u == ADMIN_ID and _test_mode == "FREE")]
@@ -1570,9 +1530,7 @@ def _scan_inner():
         msg_p = fmt_pro(sig, news_lbl, sl_l)
         msg_f = fmt_free(sig, news_lbl, sl_l)
         # ── Sticker adapté au score et à la direction ───────────────
-        if sig.get("improv"):
-            stk = STK_FIRE if sig["side"] == "SELL" else STK_ROCKET
-        elif sig.get("score", 0) >= 85:
+        if sig.get("score", 0) >= 85:
             stk = STK_CROWN   # setup élite
         elif sig.get("score", 0) >= 75:
             stk = STK_MONEY if sig["side"] == "BUY" else STK_FIRE
@@ -1584,9 +1542,7 @@ def _scan_inner():
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
             save_signal(sig, sn)
-            if sig.get("improv"):
-                _improv_cd[sig["name"]] = time.time()  # cooldown 4h par paire
-            mode_tag = " ⚡IMPROV" if sig.get("improv") else ""
+            mode_tag = ""
             log("SIG", "{} {} RR:1:{} Sc:{}{} G1:+${}".format(
                 clr(sig["name"], "b", "c"), sig["side"], sig["rr"],
                 sig["score"], mode_tag, sig["g1"]))
@@ -1602,13 +1558,18 @@ def _scan_inner():
                     FREE_LIMIT, FREE_LIMIT, PRO_PRICE, REF_TARGET, REF_MONTHS))
                 count_incr(fuid)
     # Scan summary supprimé — disponible uniquement via /scan ou /debug
-    # Rapport quotidien
+    # Rapport quotidien — envoyé à TOUS (PRO version complète, FREE version résumé)
     if int(hs)>=DAILY_HOUR and _last_d!=ds and not rep_sent(ds):
         st=daily_stats(ds)
         if st["n"]>0:
-            d=fmt_daily(st); tg_send(CHANNEL_ID,d)
-            for puid in pru: tg_send(puid,d); time.sleep(0.04)
-            mark_rep(st); _last_d=ds
+            d_pro=fmt_daily(st,is_pro=True)
+            d_free=fmt_daily(st,is_pro=False)
+            if d_pro:
+                tg_send(CHANNEL_ID,d_pro)
+                for puid in pru: tg_send(puid,d_pro); time.sleep(0.04)
+                for fuid in free_users():
+                    tg_send(fuid,d_free); time.sleep(0.04)
+                mark_rep(st); _last_d=ds
     # Rapport hebdo
     wk="{}-W{}".format(now.year,now.isocalendar()[1])
     if wd==WEEKLY_DAY and int(hs)>=WEEKLY_HOUR and _last_w!=wk and not rep_sent(wk,"weekly_rep","week_start"):
@@ -1766,7 +1727,7 @@ def send_welcome(uid,uname):
     tg_sticker(uid,STK_W)
     tg_send(uid,"🤖 <b>AlphaBot PRO v10 — Agent IA Adaptatif</b>\n"+"═"*22+"\n\n"
         "📡 20 marchés : Forex · Or · BTC · Indices · Pétrole\n"
-        "🧠 ICT/SMC v2 + <b>Mode Improvisation</b> ⚡\n"
+        "🧠 ICT/SMC v2 + <b></b> ⚡\n"
         "🌍 Régime: <b>{}</b>  ·  Challenge: <b>{:.4f}$</b>\n\n"
         "✅ Plan: <b>{}</b>\n\nSélectionne une option ↓".format(
             AI_REG.get("regime","?"),ch["balance"],get_plan(uid)),
@@ -1781,7 +1742,7 @@ def send_account(uid,uname,forced=None):
         "✅ Accès PRO + Agent IA\n" if plan in ("PRO","VIP") else "🔒 /pay pour PRO complet\n"),kb=kb_main(plan in ("PRO","VIP")))
 
 def send_pay(uid):
-    tg_send(uid,"💎 <b>PASSER EN PRO</b>\n"+"═"*22+"\n\n✅ {} signaux/jour\n✅ 20 marchés + crypto\n✅ Mode Improvisation ⚡\n✅ Agent IA Binance\n✅ Challenge 5$→500$\n\n💵 <b>PRIX: {}$ USDT TRC20</b>\n\n📤 Envoie sur:\n<code>{}</code>\n\nPuis clique <b>J'ai payé ✅</b>".format(PRO_LIMIT,PRO_PRICE,USDT_ADDR),
+    tg_send(uid,"💎 <b>PASSER EN PRO</b>\n"+"═"*22+"\n\n✅ {} signaux/jour\n✅ 20 marchés + crypto\n✅ \n✅ Agent IA Binance\n✅ Challenge 5$→500$\n\n💵 <b>PRIX: {}$ USDT TRC20</b>\n\n📤 Envoie sur:\n<code>{}</code>\n\nPuis clique <b>J'ai payé ✅</b>".format(PRO_LIMIT,PRO_PRICE,USDT_ADDR),
         kb={"inline_keyboard":[[{"text":"✅ J'ai payé","callback_data":"pay_submitted"}],[{"text":"❓ Aide @leaderOdg","url":"https://t.me/leaderOdg"}],[{"text":"◀️ Retour","callback_data":"start"}]]})
 
 def send_challenge(uid):
@@ -1796,7 +1757,7 @@ def send_challenge(uid):
         "🔄 AM Cycle: {}/4\n"
         "📂 Positions: {}/{}\n\n"
         "🌍 Régime: <b>{}</b> — {}\n"
-        "⚡ Mode Improvisation: actif\n\n"
+        "⚡ : actif\n\n"
         "⚠️ Simulation — aucun ordre réel".format(
             chal_prog(ch),w,l,wr,ch.get("today_pnl",0),ch["am_cycle"],open_t,MAX_OPEN,
             reg.get("regime","?"),reg.get("label","?")),kb=kb_back())
@@ -1805,14 +1766,12 @@ def send_rapports(uid):
     st=daily_stats(); ws=weekly_stats()
     sd=st["n"]; wd_=st["wins"]; wr_d=int(wd_/sd*100) if sd else 0
     sw=ws["n"]; ww=ws["wins"]; wr_w=int(ww/sw*100) if sw else 0
-    improv_today=db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'",(datetime.now().strftime("%Y-%m-%d")+"%",))
-    improv_cnt=improv_today[0][0] if improv_today else 0
     lines=["📈 <b>RAPPORTS DE PERFORMANCE</b>","═"*22,"","🔥 <b>AUJOURD'HUI</b>",""]
     if sd>0:
         lines+=["📡 {} signaux  ·  {} ✅  ·  {}% réussite".format(sd,wd_,wr_d),
                 "💵 Lot 0.01: <b>+${}</b>".format(st["g001"]),
                 "💰 Lot 1.00: <b>+${}</b>".format(st["g1"]),
-                "⚡ {} signal(s) improvisation".format(improv_cnt) if improv_cnt else "",""]
+                "" if improv_cnt else "",""]
     else: lines.append("⏳ Aucun signal aujourd'hui")
     lines+=["","━"*20,"","🔥🔥 <b>CETTE SEMAINE</b>",""]
     if sw>0: lines+=["📡 {} signaux  ·  {} ✅  ·  {}% réussite".format(sw,ww,wr_w),"💵 +${}  ·  💰 +${}".format(ws["g001"],ws["g1"])]
@@ -1851,15 +1810,6 @@ def send_guide(uid):
         "3️⃣ Score dynamique 0-100 pts\n"
         "4️⃣ SL/TP auto — RR min 1:2.5\n"
         "5️⃣ OTE 61.8% + FVG + CHoCHx2\n\n"
-        "━"*20+"\n"
-        "⚡ <b>Mode Improvisation (NOUVEAU) :</b>\n"
-        "Si pas de setup ICT parfait mais que :\n"
-        "• Tendance de fond valide (H1)\n"
-        "• Session active (London/NY/Overlap)\n"
-        "• Pas de news High Impact\n\n"
-        "→ L'agent entre en mode allégé :\n"
-        "  EMA Bounce / Momentum / Structure H1\n"
-        "  Risque réduit 50% · Signal marqué ⚡\n\n"
         "━"*20+"\n"
         "🤖 <b>Agent IA Binance :</b>\n"
         "• Régime marché auto (6 régimes)\n"
@@ -3198,7 +3148,7 @@ def handle_activate(uid, target):
                 "✅ Max {} signaux/jour\n"
                 "✅ Tous les marchés + crypto week-end\n"
                 "✅ Rapports quotidiens + hebdo\n"
-                "⚡ Mode Improvisation inclus\n"
+                "⚡  inclus\n"
                 "🤖 Agent IA Binance inclus\n\n"
                 "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
             tg_send(uid,
@@ -3998,7 +3948,7 @@ def send_welcome(uid, uname, ref_by=0):
         "  💱 Forex : EURUSD · GBPUSD · USDJPY · GBPJPY · EURJPY\n"
         "           AUDUSD · AUDJPY · CADJPY · USDCHF · NZDUSD · USDCAD\n"
         "  📈 Indices : NAS100 · SPX500 · US30  ·  🛢 USOIL\n\n"
-        "⚡ <b>Mode Improvisation actif</b> — signal même sans setup ICT parfait !\n\n"
+        "⚡ <b> actif</b> — signal même sans setup ICT parfait !\n\n"
         "═"*22+"\n"
         "🎁 Essai PRO {} jours GRATUIT !\n"
         "💠 PRO = max {}/j  ·  🤝 {} filleuls = {} mois PRO\n\n"
@@ -4053,7 +4003,7 @@ def send_pro_page(uid):
         "🚀 <b>STARTER</b>  —  5 signaux/jour\n"
         "  • Analyse ICT/SMC complète\n"
         "  • Entrée + TP + SL + RR\n"
-        "  • ⚡ Mode Improvisation\n"
+        "  • ⚡ \n"
         "  • <b>5$ USDT/mois</b>\n\n"
         "💠 <b>PRO</b>  —  10 signaux/jour\n"
         "  • Tout STARTER +\n"
@@ -4120,7 +4070,7 @@ def send_affilie(uid, uname):
         "📡 <b>Forex, Or, BTC, Indices...</b>\n"
         "🎯 Entrées directes avec SL & TP automatiques\n"
         "💰 Jusqu\'à <b>+$500+ par signal</b> (lot 1.00)\n"
-        "📊 Analyse ICT/SMC + <b>Mode Improvisation ⚡</b>\n\n"
+        "📊 Analyse ICT/SMC + <b></b>\n\n"
         "✅ <b>Gratuit</b> — 2 signaux/jour\n"
         "💠 <b>PRO seulement 10$</b> — 10 signaux/jour\n\n"
         "👉 <b>Clique ici :</b>\n<code>{}</code>\n\n"+"━"*22,
@@ -4158,20 +4108,17 @@ def send_admin_full(uid):
     if uid!=ADMIN_ID: tg_send(uid,"❌ Accès refusé."); return
     total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session()
     st=daily_stats(); pend=pending_pays(); ch=chal_get(); reg=AI_REG
-    improv=db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'",(datetime.now().strftime("%Y-%m-%d")+"%",))
-    improv_cnt=improv[0][0] if improv else 0
     tg_sticker(uid,STK_PRO)
     tg_send(uid,
         "🛡 <b>PANEL ADMIN — AlphaBot v10</b>\n"+"═"*22+"\n\n"
         "👥 Membres: <b>{}</b>  ·  PRO: <b>{}</b>  ·  FREE: <b>{}</b>\n"
         "📡 Signaux: <b>{}</b>  ·  Gains: <b>+${}</b>\n"
-        "⚡ Dont {} improvisation\n"
         "💰 Payés: <b>{}</b>  ·  En attente: <b>{}</b>{}\n\n"
         "🤖 <b>IA:</b> {:.4f}$ AM:{}/4 W:{} L:{}\n"
         "🌍 Régime: <b>{}</b>  Positions: {}/{}\n\n"
         "🕐 Session: {}  Score min: {}\n\n"
         "/activate /degrade /scan /debug /stats /membres /marches".format(
-            total,pro,total-pro,st["n"],st["g1"],improv_cnt,pays,len(pend),
+            total,pro,total-pro,st["n"],st["g1"],pays,len(pend),
             "  ⚠️ À valider!" if pend else "",
             ch["balance"],ch["am_cycle"],ch.get("today_w",0),ch.get("today_l",0),
             reg.get("regime","?"),sum(1 for t in AI_OT.values() if t["status"]=="open"),MAX_OPEN,sl_l,sm),
@@ -4232,12 +4179,12 @@ def send_admin_reco(uid):
     wr=int(st["wins"]/st["n"]*100) if st["n"]>=3 else 0
     recs=[]
     if st["n"]==0: recs.append("📭 Aucun signal — Lance /scan puis /debug pour voir les raisons.")
-    if wr<50 and st["n"]>=3: recs.append("📉 Winrate {}% faible — Mode Improvisation actif pour combler.".format(wr))
+    if wr<50 and st["n"]>=3: recs.append("📉 Winrate {}% faible —  actif pour combler.".format(wr))
     if (total-pro)>pro*4: recs.append("💡 {} FREE vs {} PRO — Lance un broadcast de motivation.".format(total-pro,pro))
     if pays<5: recs.append("💰 Seulement {} paiements — Envoie un message promo.".format(pays))
     if st["g1"]>500: recs.append("🔥 Excellente journée +${} ! Partage les résultats.".format(st["g1"]))
     improv=db_all("SELECT COUNT(*) FROM signals WHERE sent_at LIKE ? AND mode!='NORMAL'",(datetime.now().strftime("%Y-%m-%d")+"%",))
-    if improv and improv[0][0]>0: recs.append("⚡ {} signal(s) improvisation envoyés aujourd\'hui.".format(improv[0][0]))
+    pass  # improv supprimé
     if not recs: recs.append("✅ Tout fonctionne bien. Continue !")
     msg="🔧 <b>RECOMMANDATIONS ADMIN</b>\n"+"═"*22+"\n\n"
     for i,r in enumerate(recs,1): msg+="{}. {}\n\n".format(i,r)
@@ -4301,7 +4248,7 @@ def handle_marches_full(uid):
         for r in mlist:
             if r.get("found"):
                 s=r["signal"]; arrow="⬆️" if s["side"]=="BUY" else "⬇️"
-                tag=" ⚡" if r.get("improv") else ""
+                tag=""
                 lines.append("  🟢 <b>{}</b>{} {} {}  RR 1:{}  Score {}".format(r["name"],tag,arrow,s["side"],s["rr"],s["score"]))
                 lines.append("    📍<code>{}</code>→TP<code>{}</code> SL<code>{}</code>".format(s["entry"],s["tp"],s["sl"]))
                 found.append(r["name"])
@@ -4332,14 +4279,14 @@ PROMO_MSGS = [
     {"id":"promo_excuse","label":"🙏 Excuses membres (messages)",
      "text":"🙏 <b>Un mot de l\'équipe AlphaBot</b>\n\nCher(e) membre,\n\nNous tenons à nous excuser sincèrement pour le <b>volume important de messages</b> que vous avez reçu ces derniers jours.\n\nNous avons ajusté notre système pour vous envoyer <b>uniquement les signaux essentiels</b> — plus de bruit, plus de clarté.\n\n📡 Désormais vous recevrez :\n✅ Les signaux de trading directement\n✅ Les rapports journaliers/hebdomadaires\n✅ Les résultats TP/SL en temps réel\n\nMerci pour votre confiance et votre patience. 🙏\n\n<i>— @leaderOdg · Équipe AlphaBot PRO</i>"},
     {"id":"promo_1","label":"📡 Accroche générale",
-     "text":"📡 <b>SIGNAUX TRADING EN TEMPS RÉEL</b>\n\nTu rates des trades faute d\'entrée précise ?\n\n🎯 Entrée + Stop Loss + Take Profit automatiques\n🤖 IA qui analyse 24h/24  ·  ⚡ Mode Improvisation\n\n📩 Rejoins AlphaBot maintenant\n➡️ @leaderodg_bot"},
+     "text":"📡 <b>SIGNAUX TRADING EN TEMPS RÉEL</b>\n\nTu rates des trades faute d\'entrée précise ?\n\n🎯 Entrée + Stop Loss + Take Profit automatiques\n🤖 IA qui analyse 24h/24  ·  ⚡ \n\n📩 Rejoins AlphaBot maintenant\n➡️ @leaderodg_bot"},
     {"id":"promo_2","label":"💰 Preuve sociale",
-     "text":"💰 <b>ILS GAGNENT. ET TOI ?</b>\n\nPendant que tu hésites, d\'autres exécutent 🚀\n\nOr · Forex · BTC · Indices US\nAnalyse ICT/SMC + ⚡ Mode Improvisation\n\n✅ Signal reçu  ✅ Entrée placée  ✅ TP atteint\n\n📩 Commence <b>GRATUIT</b>\n➡️ @leaderodg_bot"},
+     "text":"💰 <b>ILS GAGNENT. ET TOI ?</b>\n\nPendant que tu hésites, d\'autres exécutent 🚀\n\nOr · Forex · BTC · Indices US\nAnalyse ICT/SMC + ⚡ \n\n✅ Signal reçu  ✅ Entrée placée  ✅ TP atteint\n\n📩 Commence <b>GRATUIT</b>\n➡️ @leaderodg_bot"},
     {"id":"promo_3","label":"⏰ Urgence / Opportunité",
      "text":"⏰ <b>LE MARCHÉ N\'ATTEND PAS</b>\n\nChaque bougie est une opportunité...\n\nAlphaBot scanne <b>EURUSD · GBPJPY · XAUUSD · NAS100</b>\net t\'envoie le signal avec l\'entrée exacte 🎯\n\n🆓 2 signaux gratuits/jour\n💎 PRO = jusqu\'à 10 signaux/jour\n\n📩 Lance-toi\n➡️ @leaderodg_bot"},
     {"id":"promo_4","label":"📊 Résultats du jour","text":None},
     {"id":"promo_5","label":"🆓 FREE vs 💎 PRO",
-     "text":"🆓 <b>GRATUIT</b> ou 💎 <b>PRO ?</b>\n\n🆓 FREE → 2 signaux/jour\n💎 PRO → jusqu\'à 10 signaux/jour\n  + Analyse ICT complète\n  + ⚡ Mode Improvisation\n  + Rapports quotidiens\n  + Agent IA Binance (Challenge 5$→500$)\n\nTout ça pour seulement <b>10$ USDT</b> 💵\nOu <b>30 filleuls = 3 mois PRO GRATUIT</b> 🤝\n\n📩 @leaderodg_bot"},
+     "text":"🆓 <b>GRATUIT</b> ou 💎 <b>PRO ?</b>\n\n🆓 FREE → 2 signaux/jour\n💎 PRO → jusqu\'à 10 signaux/jour\n  + Analyse ICT complète\n  + ⚡ \n  + Rapports quotidiens\n  + Agent IA Binance (Challenge 5$→500$)\n\nTout ça pour seulement <b>10$ USDT</b> 💵\nOu <b>30 filleuls = 3 mois PRO GRATUIT</b> 🤝\n\n📩 @leaderodg_bot"},
 ]
 
 def _build_promo(pid):
@@ -4788,7 +4735,7 @@ def dispatch(uid, uname, txt):
             if not _last_results: tg_send(uid, "Aucun scan encore."); return
             lines = ["🔍 <b>DEBUG DERNIER SCAN</b>", ""]
             for r in _last_results:
-                tag  = " ⚡" if r.get("improv") else ""
+                tag  = ""
                 icon = "🟢" if r["found"] else "⚪"
                 lines.append("{} <b>{}</b>{}  {}".format(
                     icon, r["name"], tag,
@@ -4895,7 +4842,7 @@ def dispatch_cb(cb):
                 s = r["signal"]
                 lines.append("  🟢 {} {}  RR 1:{}  Score {}{}".format(
                     r["name"], s["side"], s["rr"], s["score"],
-                    " ⚡" if r.get("improv") else ""))
+                    ""))
         reasons = {}
         for r in nf: reasons.setdefault(r.get("reason","?"), []).append(r["name"])
         lines.append("\n⚪ <b>REJETÉS ({}):</b>".format(len(nf)))
@@ -4930,7 +4877,7 @@ def dispatch_cb(cb):
                 tg_send(t_uid,
                     "🎉 <b>PRO activé !</b>\n\n"
                     "✅ Max {} signaux/jour\n"
-                    "⚡ Mode Improvisation inclus\n"
+                    "⚡  inclus\n"
                     "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
                 tg_send(uid, "✅ PRO activé : <code>{}</code>".format(t_uid),
                     kb={"inline_keyboard": [[
@@ -5028,7 +4975,7 @@ def handle_new_group_member(uid, uname, first_name):
             "✅ {} signaux/jour GRATUITS\n"
             "📊 Forex · Or · BTC · Indices · Pétrole\n"
             "🎯 Entrée + TP + SL automatiques\n"
-            "⚡ Mode Improvisation actif\n\n"
+            "⚡  actif\n\n"
             "🎁 <b>Essai PRO {} jours offert !</b>\n\n"
             "👉 Clique /start pour commencer".format(
                 name, FREE_LIMIT, TRIAL_DAYS),
@@ -5148,7 +5095,7 @@ def process_update(upd):
 # ══════════════════════════════════════════════════════
 def startup():
     print("\n"+clr("  ╔══════════════════════════════════════════════════╗","b","c"))
-    print(clr("  ║  AlphaBot PRO v10 — IA Adaptative · Improvisation  ║","b","c"))
+    print(clr("  ║  AlphaBot PRO v10 — IA Adaptative · ICT/SMC  ║","b","c"))
     print(clr("  ║  Forex·Métaux·Crypto·Indices · ICT/SMC · ⚡Mode   ║","b","c"))
     print(clr("  ╚══════════════════════════════════════════════════╝","b","c")+"\n")
     db_init()
@@ -5162,7 +5109,7 @@ def startup():
         try:
             tg_send(ADMIN_ID,
                 "🤖 <b>AlphaBot PRO v10 — DÉMARRÉ !</b>\n\n"
-                "⚡ Mode Improvisation actif\n"
+                "⚡  actif\n"
                 "🕐 {}  🎯 Score min : <b>{}</b>\n"
                 "{}\n"
                 "🌍 Régime IA : <b>{}</b>\n"
