@@ -155,6 +155,195 @@ STK_MONEY   = "CAACAgIAAxkBAAIBhmWbNa7lp9yDhKRHx_7q2sDFGn0ZAAKFAQACvhiBC-VC2IuBb
 STK_FIRE    = "CAACAgIAAxkBAAIBiGWbNcBL0k0ZGIPKHGWBq-fFxgG0AAJcAAMW0StFbJlMpSqAx3oNgQ"
 STK_CROWN   = "CAACAgIAAxkBAAIBimWbNeGxR0rp2J0m0eZ7nYJGq7cLAAKXAAMW0StFBtO28qLLMKgNgQ"
 STK_ROCKET  = "CAACAgIAAxkBAAIBjGWbNfNMiEkgPZrxgWMVBH1ycfP7AAIbAQACB8OhCsYm5NOoMByuNgQ"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ▶ PAYMENT MANAGER — Import & initialisation (patch auto)
+# ══════════════════════════════════════════════════════════════════
+try:
+    from alphabot_payment_manager import PaymentManager as _PM
+    _PM_AVAILABLE = True
+    print("[AlphaBot] ✅ PaymentManager chargé.")
+except ImportError:
+    _PM_AVAILABLE = False
+    print("[AlphaBot] ⚠️ alphabot_payment_manager.py introuvable — paiements basiques actifs.")
+
+# ── Flask Admin Panel ────────────────────────────────────────────
+try:
+    from flask import Flask as _Flask, request as _request, jsonify as _jsonify
+    from flask import session as _session, redirect as _redirect, url_for as _url_for
+    from flask import render_template_string as _render
+    import secrets as _secrets
+    _FLASK_OK = True
+    print("[AlphaBot] ✅ Flask chargé — Panel admin disponible.")
+except ImportError:
+    _FLASK_OK = False
+    print("[AlphaBot] ⚠️ Flask non installé (pip install flask) — panel web désactivé.")
+
+# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  📊 GÉNÉRATEUR DE CHART SIGNAL (style TradingView dark)
+# ══════════════════════════════════════════════════════
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    _CHART_OK = True
+except ImportError:
+    _CHART_OK = False
+
+def generate_signal_chart(sig, candles=None):
+    """
+    Génère une image PNG du signal (dark theme TradingView).
+    Retourne bytes PNG ou None si matplotlib indisponible.
+    """
+    if not _CHART_OK: return None
+    from io import BytesIO
+    import numpy as np
+
+    BG = "#0f1117"; BG2 = "#1a1d27"
+    GREEN = "#26a69a"; RED = "#ef5350"
+    YELLOW = "#ffd700"; WHITE = "#e0e0e0"; GREY = "#555566"
+
+    side  = sig["side"]
+    entry = float(sig["entry"])
+    tp    = float(sig["tp"])
+    sl    = float(sig["sl"])
+    rr    = sig["rr"]
+    score = sig.get("score", 0)
+    name  = sig["name"]
+    t     = sig.get("time", "")
+    badges= sig.get("badges", "").replace("✓","v").replace("·","-")
+    color = GREEN if side == "BUY" else RED
+    arrow = "ACHAT  ^" if side == "BUY" else "VENTE  v"
+
+    fig = plt.figure(figsize=(8.5, 5), facecolor=BG)
+    ax_c = fig.add_axes([0.02, 0.10, 0.57, 0.82], facecolor=BG2)
+    ax_i = fig.add_axes([0.63, 0.04, 0.35, 0.92], facecolor=BG)
+
+    # ── Bougies ou courbe simulée ───────────────────────
+    if candles and len(candles) >= 8:
+        n = min(40, len(candles))
+        c = candles[-n:]
+        for i, cv in enumerate(c):
+            o, h, l, cl = cv["o"], cv["h"], cv["l"], cv["c"]
+            col = GREEN if cl >= o else RED
+            ax_c.plot([i, i], [l, h], color=col, linewidth=0.7, solid_capstyle="round")
+            ax_c.add_patch(plt.Rectangle((i-0.3, min(o,cl)), 0.6, max(abs(cl-o), (h-l)*0.01),
+                                          color=col, alpha=0.88))
+        x_end = n - 1
+    else:
+        np.random.seed(int(entry * 10) % 999)
+        pts = [entry * (1 + np.random.uniform(-0.002, 0.002)) for _ in range(35)]
+        pts[-1] = entry
+        ax_c.plot(pts, color=GREY, linewidth=1.1, alpha=0.7)
+        x_end = len(pts) - 1
+
+    # Lignes niveaux
+    ax_c.axhline(entry, color=YELLOW, linewidth=1.8, linestyle="--", alpha=0.9, zorder=5)
+    ax_c.axhline(tp,    color=GREEN,  linewidth=1.3, linestyle="-",  alpha=0.85, zorder=5)
+    ax_c.axhline(sl,    color=RED,    linewidth=1.3, linestyle="-",  alpha=0.85, zorder=5)
+
+    # Labels droite
+    dp = 2 if entry > 100 else (3 if entry > 10 else 5)
+    fmt = "{:."+str(dp)+"f}"
+    ax_c.text(x_end+0.5, entry, " "+fmt.format(entry), color=YELLOW, fontsize=6.5, va="center", zorder=6)
+    ax_c.text(x_end+0.5, tp,    " "+fmt.format(tp),    color=GREEN,  fontsize=6.5, va="center", zorder=6)
+    ax_c.text(x_end+0.5, sl,    " "+fmt.format(sl),    color=RED,    fontsize=6.5, va="center", zorder=6)
+    ax_c.text(x_end+0.5, (tp+entry)/2 if side=="BUY" else (entry+tp)/2,
+              " TP", color=GREEN, fontsize=6, va="center", alpha=0.7)
+    ax_c.text(x_end+0.5, (sl+entry)/2,
+              " SL", color=RED,   fontsize=6, va="center", alpha=0.7)
+
+    # Zones colorées
+    if side == "BUY":
+        ax_c.axhspan(entry, tp, alpha=0.06, color=GREEN)
+        ax_c.axhspan(sl, entry, alpha=0.06, color=RED)
+    else:
+        ax_c.axhspan(tp, entry, alpha=0.06, color=GREEN)
+        ax_c.axhspan(entry, sl, alpha=0.06, color=RED)
+
+    ax_c.set_facecolor(BG2); ax_c.tick_params(colors=GREY, labelsize=6)
+    for sp in ax_c.spines.values(): sp.set_color(GREY); sp.set_linewidth(0.4)
+    ax_c.set_xlim(-1, x_end + 4)
+    ax_c.set_title("M15  -  AlphaBot PRO v10", color=GREY, fontsize=7.5, pad=4)
+
+    # ── Panneau droit ───────────────────────────────────
+    ax_i.axis("off")
+    y = 0.97
+
+    def row(label, val, lc=GREY, vc=WHITE, sz=9.5):
+        ax_i.text(0.02, y, label, transform=ax_i.transAxes, fontsize=sz, color=lc, va="top")
+        ax_i.text(0.98, y, val,   transform=ax_i.transAxes, fontsize=sz, color=vc, va="top",
+                  ha="right", fontweight="bold")
+
+    # Nom
+    ax_i.text(0.50, y, name, transform=ax_i.transAxes, fontsize=16,
+              color=WHITE, va="top", ha="center", fontweight="bold"); y -= 0.11
+    # Direction
+    ax_i.text(0.50, y, arrow, transform=ax_i.transAxes, fontsize=13,
+              color=color, va="top", ha="center", fontweight="bold"); y -= 0.12
+
+    # Score bar
+    ax_i.add_patch(plt.Rectangle((0.02, y-0.028), 0.96, 0.045, color="#2a2d3a",
+                                   transform=ax_i.transAxes, clip_on=False))
+    ax_i.add_patch(plt.Rectangle((0.02, y-0.028), 0.96*(score/100), 0.045, color=color,
+                                   transform=ax_i.transAxes, clip_on=False))
+    ax_i.text(0.50, y-0.005, "Score  {}/100".format(score), transform=ax_i.transAxes,
+              fontsize=8, color=WHITE, ha="center", va="top", fontweight="bold"); y -= 0.12
+
+    # Niveaux
+    rows_data = [
+        ("Entree", fmt.format(entry), YELLOW),
+        ("TP",     fmt.format(tp),    GREEN),
+        ("SL",     fmt.format(sl),    RED),
+        ("RR",     "1:{}".format(rr), WHITE),
+    ]
+    for lb, vl, vc in rows_data:
+        ax_i.text(0.02, y, lb, transform=ax_i.transAxes, fontsize=9.5, color=GREY, va="top")
+        ax_i.text(0.98, y, vl, transform=ax_i.transAxes, fontsize=9.5, color=vc,
+                  va="top", ha="right", fontweight="bold")
+        y -= 0.10
+
+    y -= 0.02
+    if badges:
+        short = badges[:50]+("..." if len(badges)>50 else "")
+        ax_i.text(0.02, y, short, transform=ax_i.transAxes,
+                  fontsize=6.8, color=GREY, va="top", wrap=True); y -= 0.10
+    ax_i.text(0.50, y, "{} UTC".format(t), transform=ax_i.transAxes,
+              fontsize=7.5, color=GREY, va="top", ha="center", alpha=0.8); y -= 0.09
+    ax_i.text(0.50, y, "Not financial advice", transform=ax_i.transAxes,
+              fontsize=6.5, color=GREY, va="top", ha="center", alpha=0.55)
+
+    fig.text(0.5, 0.01, "@leaderodg_bot", ha="center", fontsize=7.5, color=GREY, alpha=0.6)
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+                facecolor=BG, edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+def tg_send_photo(cid, img_bytes, caption=""):
+    """Envoie une image PNG via Telegram sendPhoto."""
+    bd = "AB10PH"
+    body = b""
+    def f(n, v):
+        return ("--{}\r\nContent-Disposition: form-data; name=\"{}\"\"\r\n\r\n".format(bd,n)).encode()+str(v).encode()+b"\r\n"
+    body += f("chat_id", cid)
+    if caption:
+        body += f("caption", caption[:1024])
+        body += f("parse_mode", "HTML")
+    body += ("--{}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"signal.png\"\r\nContent-Type: image/png\r\n\r\n".format(bd)).encode()
+    body += img_bytes + b"\r\n" + ("--{}--\r\n".format(bd)).encode()
+    try:
+        req = urllib.request.Request(TG+"sendPhoto", data=body, method="POST",
+            headers={"Content-Type":"multipart/form-data; boundary="+bd})
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CTX))
+        with opener.open(req, timeout=30) as r: return json.loads(r.read().decode())
+    except Exception as e:
+        log("WARN","tg_send_photo: {}".format(e)); return {}
+
 def tg_send_sticker(chat_id, sticker_id): tg_req("sendSticker", {"chat_id": str(chat_id), "sticker": sticker_id})
 def tg_sticker(cid, sid): tg_req("sendSticker",{"chat_id":str(cid),"sticker":sid})
 
@@ -424,6 +613,65 @@ def mem_record(key, result, pnl):
     w+=(1 if result=="WIN" else 0); l+=(0 if result=="WIN" else 1); p=round(p+pnl,4)
     db_run("INSERT OR REPLACE INTO ai_mem(key,wins,losses,pnl,updated) VALUES(?,?,?,?,?)",(key,w,l,p,datetime.now().isoformat()))
 
+def setup_key(sig):
+    """
+    Génère une clé de mémoire précise pour un signal :
+    paire | session | badges principaux
+    Ex: "XAUUSD|LONDON_KZ|OTE+FVG+LIQ"
+    """
+    sn,_,_,_=get_session()
+    badges_raw = sig.get("badges","")
+    # Extraire les confirmations clés
+    tags=[]
+    if "OTE" in badges_raw:   tags.append("OTE")
+    if "FVG" in badges_raw:   tags.append("FVG")
+    if "CHoCH" in badges_raw: tags.append("CHoCH")
+    if "Sweep" in badges_raw or "Stop Hunt" in badges_raw or "EQ" in badges_raw: tags.append("LIQ")
+    if "H&S" in badges_raw or "IH&S" in badges_raw: tags.append("HS")
+    if "Double" in badges_raw: tags.append("DBL")
+    if "Breakout" in badges_raw: tags.append("BRK")
+    if "Macro" in badges_raw: tags.append("MAC")
+    tag_str = "+".join(tags) if tags else "BASE"
+    return "{}|{}|{}".format(sig.get("name","?"), sn, tag_str)
+
+def mem_adj_score(sig_key, sc):
+    """
+    Ajuste le score selon l'historique IA de ce setup.
+    Minimum 5 trades pour que la mémoire agisse.
+    WR > 70% → +8 pts  |  WR 50-70% → +3 pts
+    WR 35-50% → -8 pts  |  WR < 35% → -15 pts
+    """
+    w,l,pnl=mem_query(sig_key)
+    total=w+l
+    if total < 5: return sc, ""   # pas assez d'historique
+    wr=w/total
+    if wr > 0.70:   return min(sc+8, 115),  "🧠 WR {}%✓".format(int(wr*100))
+    if wr > 0.50:   return min(sc+3, 115),  ""
+    if wr > 0.35:   return max(sc-8, 0),    ""
+    return max(sc-15, 0), ""   # setup perdant → pénalité forte
+
+def best_setups(n=5):
+    """Top N setups par winrate (minimum 5 trades)."""
+    data=db_all("SELECT key,wins,losses,pnl FROM ai_mem")
+    res=[]
+    for k,w,l,p in data:
+        t=w+l
+        if t<5: continue
+        res.append({"key":k,"wins":w,"losses":l,"total":t,"wr":round(w/t*100),"pnl":round(p,2)})
+    res.sort(key=lambda x:(-x["wr"],-x["total"]))
+    return res[:n]
+
+def worst_setups(n=5):
+    """Top N setups les moins performants."""
+    data=db_all("SELECT key,wins,losses,pnl FROM ai_mem")
+    res=[]
+    for k,w,l,p in data:
+        t=w+l
+        if t<5: continue
+        res.append({"key":k,"wins":w,"losses":l,"total":t,"wr":round(w/t*100),"pnl":round(p,2)})
+    res.sort(key=lambda x:(x["wr"],-x["total"]))
+    return res[:n]
+
 # ══════════════════════════════════════════════════════
 #  SESSIONS
 # ══════════════════════════════════════════════════════
@@ -596,24 +844,218 @@ def ote_zone(sh,sl,bias):
     return sl+rng*0.618,sl+rng*0.786
 
 # ══════════════════════════════════════════════════════
-#  🧠 MODE IMPROVISATION — Le cœur du v10
+#  📐 PATTERNS TECHNIQUES M5 — Bonus score
+#  Tous optionnels : augmentent le score, ne bloquent pas
 # ══════════════════════════════════════════════════════
+
+def pat_head_shoulders(c, bias):
+    """Head & Shoulders → bearish / Inverse H&S → bullish"""
+    if len(c) < 20: return False
+    if bias == "BEARISH":
+        highs = [x["h"] for x in c[-20:]]
+        h1 = max(highs[:7]); h2 = max(highs[6:14]); h3 = max(highs[13:])
+        return h2 > h1 * 1.001 and h2 > h3 * 1.001 and abs(h1-h3)/h2 < 0.015
+    else:
+        lows = [x["l"] for x in c[-20:]]
+        l1 = min(lows[:7]); l2 = min(lows[6:14]); l3 = min(lows[13:])
+        return l2 < l1 * 0.999 and l2 < l3 * 0.999 and abs(l1-l3)/l2 < 0.015
+
+def pat_double_top_bottom(c, bias, tol=0.0015):
+    """Double Top (bearish) / Double Bottom (bullish)"""
+    if len(c) < 15: return False
+    if bias == "BEARISH":
+        highs = [x["h"] for x in c[-15:]]
+        h1 = max(highs[:7]); h2 = max(highs[7:])
+        return h1 > 0 and abs(h1-h2)/h1 < tol
+    else:
+        lows = [x["l"] for x in c[-15:]]
+        l1 = min(lows[:7]); l2 = min(lows[7:])
+        return l1 > 0 and abs(l1-l2)/l1 < tol
+
+def pat_breakout_retest(c, bias):
+    """Cassure + retest du niveau — confirmation de continuation"""
+    if len(c) < 10: return False
+    last = c[-1]; prev = c[-2]; prev2 = c[-3]
+    if bias == "BULLISH":
+        # Cassure d'un high récent + clôture dessus
+        rh = max(x["h"] for x in c[-10:-2])
+        return last["c"] > rh and prev["c"] > rh and prev2["c"] < rh
+    else:
+        rl = min(x["l"] for x in c[-10:-2])
+        return last["c"] < rl and prev["c"] < rl and prev2["c"] > rl
+
+def pat_fake_breakout(c, bias):
+    """Fake breakout (stop hunt visible sur M5) aligné avec le bias"""
+    if len(c) < 5: return False
+    last = c[-1]; prev = c[-2]
+    if bias == "BULLISH":
+        # Spike bas puis rejet haussier
+        lower_wick = min(last["o"], last["c"]) - last["l"]
+        body = abs(last["c"] - last["o"])
+        return last["c"] > prev["l"] and lower_wick > body * 1.5 and last["c"] > last["o"]
+    else:
+        upper_wick = last["h"] - max(last["o"], last["c"])
+        body = abs(last["c"] - last["o"])
+        return last["c"] < prev["h"] and upper_wick > body * 1.5 and last["c"] < last["o"]
+
+def pattern_score_m5(c, bias):
+    """
+    Calcule le bonus de score total des patterns M5.
+    Retourne (score_bonus, liste_badges).
+    Max +50 pts. Tous optionnels.
+    """
+    if not c or len(c) < 20: return 0, []
+    score = 0; badges = []
+    if pat_head_shoulders(c, bias):
+        score += 15
+        badges.append("H&S ✓" if bias=="BEARISH" else "IH&S ✓")
+    if pat_double_top_bottom(c, bias):
+        score += 12
+        badges.append("Double Top ✓" if bias=="BEARISH" else "Double Bot ✓")
+    if pat_breakout_retest(c, bias):
+        score += 18
+        badges.append("Breakout ✓")
+    if pat_fake_breakout(c, bias):
+        score += 15
+        badges.append("Fake BO ✓")
+    return min(score, 50), badges
 
 # ══════════════════════════════════════════════════════
 #  AGENT ANALYZE PRINCIPAL
 # ══════════════════════════════════════════════════════
 def news_check():
+    """Rétrocompatibilité — appelle news_filter() en interne."""
+    status, title, _ = news_filter()
+    if status == "BLOCK":
+        return False, "⚠️ News HIGH: {}".format((title or "?")[:30])
+    return True, "✅ OK"
+
+# ── Cache news pour éviter de répéter les appels HTTP ─────────────
+_news_cache = {"data": None, "ts": 0}
+_NEWS_CACHE_SEC = 300  # 5 min
+
+def _get_news_data():
+    global _news_cache
+    if time.time() - _news_cache["ts"] < _NEWS_CACHE_SEC and _news_cache["data"]:
+        return _news_cache["data"]
     try:
-        body=json.loads(http_get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",timeout=8))
-        now=datetime.utcnow()
-        for evt in body:
-            if evt.get("impact","")!="High": continue
+        data = json.loads(http_get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=8))
+        _news_cache = {"data": data, "ts": time.time()}
+        return data
+    except:
+        return _news_cache["data"] or []
+
+def news_filter():
+    """
+    Filtre news intelligent — 3 niveaux :
+    BLOCK   : news HIGH dans les 30 min → pas de signal
+    CAUTION : news HIGH dans les 2h → score -10
+    OK      : aucun risque immédiat
+    Retourne (status, title, score_adj)
+    """
+    try:
+        data = _get_news_data()
+        now  = datetime.utcnow()
+        for evt in data:
+            if evt.get("impact","") != "High": continue
             try:
-                et=datetime.strptime(evt["date"],"%Y-%m-%dT%H:%M:%S%z").replace(tzinfo=None)
-                if abs((et-now).total_seconds())<1800: return False,"⚠️ News HIGH: {}".format(evt.get("title","?")[:30])
+                et   = datetime.strptime(evt["date"], "%Y-%m-%dT%H:%M:%S%z").replace(tzinfo=None)
+                diff = abs((et - now).total_seconds())
+                if diff < 1800:  return "BLOCK",   evt.get("title","?"), 0
+                if diff < 7200:  return "CAUTION",  evt.get("title","?"), -10
             except: pass
-        return True,"✅ OK"
-    except: return True,"✅ OK"
+        return "OK", None, 0
+    except:
+        return "OK", None, 0
+
+# ── Biais fondamental par devise ──────────────────────────────────
+_fund_cache = {"bias": {}, "ts": 0}
+_FUND_CACHE_SEC = 600  # 10 min
+
+CURRENCY_MAP = {
+    "EURUSD": ("EUR", "USD"), "GBPUSD": ("GBP", "USD"),
+    "USDJPY": ("USD", "JPY"), "GBPJPY": ("GBP", "JPY"),
+    "EURJPY": ("EUR", "JPY"), "AUDUSD": ("AUD", "USD"),
+    "AUDJPY": ("AUD", "JPY"), "CADJPY": ("CAD", "JPY"),
+    "USDCHF": ("USD", "CHF"), "NZDUSD": ("NZD", "USD"),
+    "USDCAD": ("USD", "CAD"), "XAUUSD": ("XAU", "USD"),
+    "XAGUSD": ("XAG", "USD"), "BTCUSD": ("BTC", "USD"),
+    "NAS100": ("USA", "USD"), "SPX500": ("USA", "USD"),
+    "US30":   ("USA", "USD"), "USOIL":  ("OIL", "USD"),
+}
+
+NEWS_WEIGHTS = {
+    "interest rate": 3, "fed ":3, "fomc":3, "ecb":3, "boe":3, "boj":3,
+    "nfp":2, "non-farm":2, "payroll":2, "cpi":2, "inflation":2, "pce":2,
+    "gdp":2, "employment":1, "retail":1, "pmi":1, "unemployment":1,
+}
+
+def fundamental_bias(pair_name):
+    """
+    Calcule le biais fondamental d'une paire selon les news de la semaine.
+    Retourne (base_score, quote_score, badge_str)
+    """
+    global _fund_cache
+    if time.time() - _fund_cache["ts"] < _FUND_CACHE_SEC:
+        cached = _fund_cache["bias"].get(pair_name)
+        if cached: return cached
+
+    try:
+        data = _get_news_data()
+        currencies = CURRENCY_MAP.get(pair_name, (None, None))
+        scores = {c: 0 for c in currencies if c}
+
+        for evt in data:
+            cur = evt.get("currency","")
+            if cur not in scores: continue
+            title = evt.get("title","").lower()
+            impact = evt.get("impact","")
+            w = 0
+            for kw, weight in NEWS_WEIGHTS.items():
+                if kw in title: w = max(w, weight)
+            if impact == "High" and w == 0: w = 1
+            scores[cur] = scores.get(cur, 0) + w
+
+        base, quote = currencies
+        bs = scores.get(base, 0); qs = scores.get(quote, 0)
+        diff = bs - qs
+
+        if diff >= 3:    result = ("BASE_STRONG",  "+{}pts macro".format(diff))
+        elif diff <= -3: result = ("QUOTE_STRONG", "+{}pts macro".format(abs(diff)))
+        else:            result = ("NEUTRAL", "")
+
+        _fund_cache["bias"][pair_name] = (bs, qs, result[0], result[1])
+        if time.time() - _fund_cache["ts"] > _FUND_CACHE_SEC:
+            _fund_cache["ts"] = time.time()
+
+        return bs, qs, result[0], result[1]
+    except:
+        return 0, 0, "NEUTRAL", ""
+
+def fundamental_score_adj(pair_name, bias_tech):
+    """
+    Retourne (score_adj, badge) selon alignement technique/fondamental.
+    Alignement  → +12 pts
+    Contradiction → -15 pts
+    Neutre       → 0 pts
+    """
+    try:
+        bs, qs, fund, badge = fundamental_bias(pair_name)
+        base, quote = CURRENCY_MAP.get(pair_name, (None, None))
+        if not base or fund == "NEUTRAL": return 0, ""
+
+        # BASE_STRONG = base devise forte = signal BEARISH pour quote (ex USD fort = SELL EURUSD)
+        if fund == "BASE_STRONG":
+            if bias_tech == "BEARISH": return +12, "Macro ✓"   # aligné
+            if bias_tech == "BULLISH": return -15, ""           # contre macro
+        if fund == "QUOTE_STRONG":
+            if bias_tech == "BULLISH": return +12, "Macro ✓"   # aligné
+            if bias_tech == "BEARISH": return -15, ""           # contre macro
+        return 0, ""
+    except:
+        return 0, ""
+
+
 
 
 # ══════════════════════════════════════════════════════
@@ -783,6 +1225,34 @@ def agent_analyze(m, score_min, news_ok, q):
             m1_bias,_,_=detect_bias(m1[-30:] if len(m1)>=30 else m1)
             if m1_bias==b: sc=min(sc+10,115)  # M1 aligné avec H1
 
+        # ── PATTERNS M5 : bonus score ─────────────────
+        m5_pat = fetch_c(m["sym"], "5m", "3d")  # M5 pour patterns visuels
+        pat_bonus, pat_badges = pattern_score_m5(m5_pat, b) if m5_pat else (0, [])
+        if pat_bonus > 0:
+            sc = min(sc + pat_bonus, 115)
+
+        # ── FONDAMENTAL : alignement macro ────────────
+        news_status, news_title, news_adj = news_filter()
+        if news_status == "BLOCK":
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,
+                   "reason":"News BLOCK: {}".format((news_title or "?")[:25]),"improv":False}); return
+        if news_status == "CAUTION":
+            sc = max(0, sc + news_adj)  # -10 pts si news dans 2h
+
+        fund_adj, fund_badge = fundamental_score_adj(m["name"], b)
+        if fund_adj != 0:
+            sc = min(max(0, sc + fund_adj), 115)
+
+        # ── MÉMOIRE IA : ajustement selon historique ──
+        # On construit une clé provisoire pour consulter la mémoire
+        _tmp_badges = []
+        if in_ote:  _tmp_badges.append("OTE")
+        if fvg_z:   _tmp_badges.append("FVG")
+        if cc2>=2:  _tmp_badges.append("CHoCH")
+        if liq:     _tmp_badges.append("LIQ")
+        _tmp_key = "{}|{}|{}".format(m["name"], get_session()[0], "+".join(_tmp_badges) or "BASE")
+        sc, mem_badge = mem_adj_score(_tmp_key, sc)
+
         # ── Liquidité : condition OBLIGATOIRE ─────────
         liq=agent_liquidity(m15,b)
         if not liq:
@@ -806,13 +1276,16 @@ def agent_analyze(m, score_min, news_ok, q):
                     tp=tp_eq if tp_eq else e+risk*3.0
                     gain_net=abs(tp-e)-sp_p
                     rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=3.0:  # RR MINIMUM 3.0
+                    if rr>=3.0:  # RR MINIMUM 3.0 (sniper)
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
                         ptp=gain_net/pip; psl=(risk+sp_p)/pip
                         badges=[liq["label"]]
                         if in_ote: badges.append("OTE ✓")
                         if fvg_z:  badges.append("FVG ✓")
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                        if pat_badges: badges.extend(pat_badges)
+                        if fund_badge: badges.append(fund_badge)
+                        if mem_badge:  badges.append(mem_badge)
                         tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
                         sig={"name":m["name"],"cat":m["cat"],"side":"BUY","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
@@ -820,7 +1293,7 @@ def agent_analyze(m, score_min, news_ok, q):
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
                              "badges":" · ".join(badges)+"  📊 "+tf_tag,
                              "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0}
+                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0,"setup_key":_tmp_key}
             else:
                 sl=bb["top"]+buf+sp_p; risk=sl-e
                 if risk>0 and risk<=a*12:
@@ -828,13 +1301,16 @@ def agent_analyze(m, score_min, news_ok, q):
                     tp=tp_eq if tp_eq else e-risk*3.0
                     gain_net=abs(tp-e)-sp_p
                     rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=3.0:  # RR MINIMUM 3.0
+                    if rr>=3.0:  # RR MINIMUM 3.0 (sniper)
                         dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
                         ptp=gain_net/pip; psl=(risk+sp_p)/pip
                         badges=[liq["label"]]
                         if in_ote: badges.append("OTE ✓")
                         if fvg_z:  badges.append("FVG ✓")
                         if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
+                        if pat_badges: badges.extend(pat_badges)
+                        if fund_badge: badges.append(fund_badge)
+                        if mem_badge:  badges.append(mem_badge)
                         tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
                         sig={"name":m["name"],"cat":m["cat"],"side":"SELL","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
                              "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
@@ -842,7 +1318,7 @@ def agent_analyze(m, score_min, news_ok, q):
                              "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
                              "badges":" · ".join(badges)+"  📊 "+tf_tag,
                              "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0}
+                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0,"setup_key":_tmp_key}
 
         if sig:
             q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,"improv":False})
@@ -1174,58 +1650,138 @@ def _confidence_bar(sc):
     filled = sc // 10
     return "█" * filled + "░" * (10 - filled) + f"  {sc}/100"
 
+
+def _confidence(sc):
+    if sc >= 95: return "TRES HAUTE", "🔥"
+    if sc >= 88: return "HAUTE",      "💎"
+    if sc >= 80: return "BONNE",      "✅"
+    return "CORRECTE", "📊"
+
+def _risk_advice(sc, news_ok, sn):
+    """Recommandation de taille de position selon le contexte."""
+    if not news_ok:         return "0.5% — news proches"
+    if sc >= 92:            return "1.5 à 2% — setup élite"
+    if sc >= 85:            return "1% — setup validé"
+    return "0.5 à 1% — standard"
+
+def _entry_timing(sig, m15_c=None):
+    """Indique si l'entrée est immédiate ou nécessite confirmation M1."""
+    if sig.get("badges","").count("M1") > 0 or "M1" in sig.get("badges",""):
+        return "Entree immediate — M1 confirme"
+    return "Attendre confirmation bougie M1"
+
+def _trade_reason(sig):
+    """Construit en 1 ligne la raison du signal."""
+    parts = []
+    b = sig.get("badges","")
+    if "Sweep" in b or "Stop Hunt" in b or "EQ" in b: parts.append("liquidite prise")
+    if "OTE" in b:    parts.append("zone OTE")
+    if "FVG" in b:    parts.append("FVG actif")
+    if "CHoCH" in b:  parts.append("CHoCH confirme")
+    if "Breakout" in b: parts.append("breakout retest")
+    if "H&S" in b or "IH&S" in b: parts.append("Head&Shoulders")
+    if "Double" in b: parts.append("double top/bot")
+    if "Macro" in b:  parts.append("alignement macro")
+    bt = sig.get("btype","")
+    if bt: parts.insert(0, "biais H1 ({})".format(bt))
+    return "  +  ".join(parts) if parts else "OB M15 + structure H1"
+
+def _score_bar(sc):
+    filled = round(sc / 10)
+    empty  = 10 - filled
+    return "█" * filled + "░" * empty
+
+def _mem_line(s):
+    """Affiche le WR historique du setup si suffisamment de données."""
+    key = s.get("setup_key","")
+    if not key: return None
+    w,l,pnl = mem_query(key)
+    t = w+l
+    if t < 5: return None
+    wr = int(w/t*100)
+    icon = "🔥" if wr>70 else "✅" if wr>50 else "⚠️"
+    return f"│  {icon} Mémoire IA : <b>{wr}%</b> WR sur {t} trades  (+${round(pnl,2)})"
+
 def fmt_pro(s, news, sl_label):
     se       = "🟢" if s["side"] == "BUY" else "🔴"
     arrow    = "📈" if s["side"] == "BUY" else "📉"
     sf       = "ACHAT" if s["side"] == "BUY" else "VENTE"
     emo      = CAT_EMO.get(s["cat"], "📊")
-    mode_lbl = MODE_LABELS.get(s["mode"], "?")
     liq      = s.get("liq") or {}
-    liq_line = f'💧 Liquidité : <b>{liq.get("label","—")}</b>  (niveau {liq.get("level","—")})' if liq else ""
-    bar      = _confidence_bar(s["score"])
-    sc_lbl   = _score_label(s["score"])
-    news_lbl = "✅ Calme" if "✅" in news else "⚠️ Actif"
-    sp_s     = "✅ OK" if s["sp"] < 3 else "⚠️ Large"
+    is_improv= False
     sep      = "═" * 24
 
-    # ── Phrase d'accroche selon le score ────────────────────────────
-    if s["score"] >= 85:
-        hook = "🔥 <b>Setup PREMIUM — Confluence maximale</b>"
-    elif s["score"] >= 75:
-        hook = "💎 <b>Setup de haute qualité — ICT confirmé</b>"
-    else:
-        hook = "📊 <b>Setup valide — Conditions réunies</b>"
+    sc       = s["score"]
+    conf_txt, conf_ico = _confidence(sc)
+    risk_txt = _risk_advice(sc, "✅" in news, sl_label)
+    timing   = _entry_timing(s)
+    reason   = _trade_reason(s)
+    bar      = _score_bar(sc)
+    sn,_,_,_ = get_session()
+    news_lbl = "Calme" if "✅" in news else "Actif"
+    sp_s     = "OK" if s["sp"] < 3 else "Large"
+    mem_l    = _mem_line(s)
 
     lines = [
-        f"{arrow} {se} <b>SIGNAL PRO {sf} · {s['name']}</b>  {emo}",
+        f"{arrow} {se} <b>{s['name']} — {sf}</b>  {emo}",
         sep,
-        hook,
-        liq_line,
-        f"🕐 {s['time']} UTC  ·  {sl_label}",
+        f"{conf_ico} Confiance : <b>{conf_txt}</b>  ·  {sl_label}",
+        f"🕐 {s['time']} UTC",
         "",
-        "┌─ <b>NIVEAUX</b> ──────────────────",
-        f"│  📍 Entrée : <code>{s['entry']}</code>",
-        f"│  ✅ TP     : <code>{s['tp']}</code>",
-        f"│  ❌ SL     : <code>{s['sl']}</code>",
-        f"│  📐 RR     : <b>1:{s['rr']}</b>",
-        "└───────────────────────────",
+        "┌─ <b>NIVEAUX</b> ──────────────────────",
+        f"│  Entree : <code>{s['entry']}</code>",
+        f"│  TP     : <code>{s['tp']}</code>",
+        f"│  SL     : <code>{s['sl']}</code>",
+        f"│  RR     : <b>1:{s['rr']}</b>",
+        "└────────────────────────────────",
         "",
         f"💵 Lot 0.01 : <b>+${s['g001']}</b> TP  /  <b>-${s['l001']}</b> SL",
         f"💰 Lot 1.00 : <b>+${s['g1']}</b> TP  /  <b>-${s['l1']}</b> SL",
         "",
-        "┌─ <b>ANALYSE IA</b> ─────────────────",
-        f"│  {sc_lbl}  [{bar}]",
+        "┌─ <b>ANALYSE</b> ────────────────────────",
+        f"│  Score    : [{bar}] <b>{sc}/100</b>",
+        f"│  Raison   : {reason}",
         f"│  Tendance : <b>{s['bias']}</b>  ({s['btype']})",
-        f"│  Mode     : <b>{mode_lbl}</b>",
-        f"│  {s.get('badges', '—')}" if s.get('badges') and not s.get('improv') else None,
-        "└───────────────────────────",
+        f"│  Timing   : {timing}",
+        mem_l,
+        "└────────────────────────────────",
         "",
-        f"📰 News: {news_lbl}  ·  Spread: {sp_s}",
+        f"⚡ <b>Risk conseille</b> : {risk_txt}",
+        f"📰 News : {news_lbl}  ·  Spread : {sp_s}",
         sep,
-        "⚠️ Risk 1-2% max  ·  Not financial advice",
-        "🤖 <b>AlphaBot PRO</b>  ·  @leaderodg_bot",
+        "⚠️ Analyse technique uniquement — pas un conseil financier",
+        "🤖 <b>AlphaBot PRO v10</b>  ·  @leaderodg_bot",
     ]
     return "\n".join(l for l in lines if l is not None)
+
+
+def fmt_blocked(s):
+    """Signal sniper score ≥ 90 — teaser professionnel pour FREE."""
+    se  = "🟢" if s["side"] == "BUY" else "🔴"
+    sf  = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo = CAT_EMO.get(s["cat"], "📊")
+    sep = "═" * 22
+    sc  = s.get("score", 0)
+    return (
+        f"⚠️ <b>Setup détecté — {s['name']}</b>  {emo}\n"
+        f"{sep}\n"
+        f"{se} <b>{sf}</b>  ·  Score : <b>{sc}/100</b>\n"
+        f"📐 RR : <b>1:{s['rr']}</b>  ·  {s.get('time','')} UTC\n"
+        f"\n"
+        f"Ce signal a passé tous les filtres :\n"
+        f"  ✔️ Liquidité Smart Money confirmée\n"
+        f"  ✔️ Order Block M15 validé\n"
+        f"  ✔️ Alignement multi-timeframe\n"
+        f"\n"
+        f"Il n\'a pas été envoyé en version gratuite.\n"
+        f"\n"
+        f"💡 Beaucoup voient les marchés bouger…\n"
+        f"Peu ont les outils pour agir au bon moment.\n"
+        f"\n"
+        f"{sep}\n"
+        f"💎 <b>AlphaBot PRO</b> — signaux filtrés, précision maximale.\n"
+        f"👉 @leaderodg_bot  →  /pay"
+    )
 
 def fmt_free(s, news, sl_label):
     se    = "🟢" if s["side"] == "BUY" else "🔴"
@@ -1527,37 +2083,91 @@ def _scan_inner():
     pru_eff = [u for u in pru if not (u == ADMIN_ID and _test_mode == "FREE")]
     fru_eff = list(fru) + ([ADMIN_ID] if _test_mode == "FREE" and ADMIN_ID not in fru else [])
     for sig, key in sigs:
+        sc = sig.get("score", 0)
+        is_sniper = sc >= 90  # Signal élite → PRO uniquement, teaser FREE
+
         msg_p = fmt_pro(sig, news_lbl, sl_l)
         msg_f = fmt_free(sig, news_lbl, sl_l)
-        # ── Sticker adapté au score et à la direction ───────────────
-        if sig.get("score", 0) >= 85:
-            stk = STK_CROWN   # setup élite
-        elif sig.get("score", 0) >= 75:
-            stk = STK_MONEY if sig["side"] == "BUY" else STK_FIRE
+        msg_blocked = fmt_blocked(sig)  # Message teaser pour FREE sur signal élite
+
+        # Sticker
+        stk = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
+
+        # ── Générer l'image du signal ────────────────────────────────
+        chart_img = None
+        try:
+            m15_c = fetch_c(m_obj["sym"], "15m", "3d") if (m_obj := next((x for x in MARKETS if x["name"]==sig["name"]),None)) else None
+            chart_img = generate_signal_chart(sig, m15_c)
+        except: pass
+
+        # ── Alerte sniper AVANT le signal (FOMO propre) ────────────
+        if is_sniper:
+            sniper_alert = (
+                "🚨 <b>SNIPER SETUP DETECTE — {}</b>\n\n"
+                "Score : <b>{}/100</b>  RR : <b>1:{}</b>\n"
+                "Conditions : quasi parfaites.\n\n"
+                "Ce type de setup est rare.\n"
+                "Il a ete envoye aux membres PRO.\n\n"
+                "💎 /pay — AlphaBot PRO v10"
+            ).format(sig["name"], sc, sig["rr"])
+            tg_send(CHANNEL_ID, sniper_alert)
+            for fuid in fru_eff: tg_send(fuid, sniper_alert); time.sleep(0.03)
+            time.sleep(0.5)
+
+        # ── Canal public ────────────────────────────────────────────
+        channel_msg = msg_blocked if is_sniper else msg_f
+        if chart_img and not is_sniper:
+            # Signal avec image pour FREE
+            r = tg_send_photo(CHANNEL_ID, chart_img, caption=channel_msg[:1024])
         else:
-            stk = STK_SIGNAL
-        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
-        time.sleep(0.3)
-        r = tg_send(CHANNEL_ID, msg_f)
+            tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
+            time.sleep(0.2)
+            r = tg_send(CHANNEL_ID, channel_msg)
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
             save_signal(sig, sn)
-            mode_tag = ""
             log("SIG", "{} {} RR:1:{} Sc:{}{} G1:+${}".format(
                 clr(sig["name"], "b", "c"), sig["side"], sig["rr"],
-                sig["score"], mode_tag, sig["g1"]))
+                sc, " SNIPER" if is_sniper else "", sig["g1"]))
+
+        # ── PRO : signal complet + image ─────────────────────────────
         for puid in pru_eff:
             if count_today(puid) < PRO_LIMIT:
-                tg_send(puid, msg_p); count_incr(puid); time.sleep(0.04)
+                if chart_img:
+                    tg_send_photo(puid, chart_img, caption=msg_p[:1024])
+                else:
+                    tg_send(puid, msg_p)
+                count_incr(puid); time.sleep(0.05)
+
+        # ── FREE : signal normal si dispo, teaser si sniper ───────────
         for fuid in fru_eff:
             c = count_today(fuid)
-            if c < FREE_LIMIT:
+            if is_sniper:
+                # Signal sniper → teaser seulement, pas de compteur consommé
+                tg_send(fuid, msg_blocked); time.sleep(0.04)
+            elif c < FREE_LIMIT:
                 tg_send(fuid, msg_f); count_incr(fuid); time.sleep(0.04)
             elif c == FREE_LIMIT:
-                tg_send(fuid, "🛑 <b>Limite FREE {}/{}</b>\n\n/pay — {}$ USDT\n{} filleuls = {} mois PRO!".format(
-                    FREE_LIMIT, FREE_LIMIT, PRO_PRICE, REF_TARGET, REF_MONTHS))
+                tg_send(fuid, (
+                    "📊 <b>Signaux gratuits utilisés pour aujourd\'hui.</b>\n\n"
+                    "Soyons honnêtes :\n"
+                    "Si tu suis uniquement les signaux gratuits,\n"
+                    "tu vois les opportunités… sans pouvoir les exploiter pleinement.\n\n"
+                    "💎 <b>AlphaBot PRO</b> — {} signaux/jour, qualité maximale.\n"
+                    "La question est simple :\n"
+                    "observer, ou agir avec précision ?\n\n"
+                    "👉 @leaderodg_bot  →  /pay"
+                ).format(PRO_LIMIT))
                 count_incr(fuid)
-    # Scan summary supprimé — disponible uniquement via /scan ou /debug
+
+    # ── Aucun signal : message "pas de setup" si heure active ──────
+    sn2,_,_,wknd2=get_session()
+    if not sigs and sn2 not in ("OFF","ASIAN") and not wknd2:
+        if int(hs) in (8,9,13,14,17,18):  # heures de sessions clés seulement
+            tg_send(ADMIN_ID,
+                "🔍 Scan {} — Aucun setup propre ce cycle.\n"
+                "Marchés actifs mais conditions insuffisantes (score < 85 ou liquidité absente).\n"
+                "Prochaine analyse dans {}s.".format(scan_t, SCAN_SEC))
     # Rapport quotidien — envoyé à TOUS (PRO version complète, FREE version résumé)
     if int(hs)>=DAILY_HOUR and _last_d!=ds and not rep_sent(ds):
         st=daily_stats(ds)
@@ -1635,15 +2245,35 @@ def check_open_sigs():
             m=next((x for x in MARKETS if x["name"]==pair),None)
             if not m: continue
             try:
-                c=fetch_c(m["sym"],"5m","1d")
+                c=fetch_c(m["sym"],"15m","1d")
                 if not c: continue
                 cur=c[-1]["c"]
+                # Récupérer la clé setup depuis la DB signals
+                sig_row=db_one("SELECT score,mode FROM signals WHERE id=?",(tid,))
+                _score=sig_row[0] if sig_row else 0
+                _skey="{}|{}|BASE".format(pair, get_session()[0])
                 if side=="BUY":
-                    if cur>=tp: close_track(tid,"TP"); notify_result(pair,side,entry,tp,sl,"TP",cur)
-                    elif cur<=sl: close_track(tid,"SL"); notify_result(pair,side,entry,tp,sl,"SL",cur)
+                    if cur>=tp:
+                        close_track(tid,"TP")
+                        pnl_est=abs(tp-entry)/(m["pip"])*0.01  # lot 0.01
+                        mem_record(_skey,"WIN",round(pnl_est,4))
+                        notify_result(pair,side,entry,tp,sl,"TP",cur)
+                    elif cur<=sl:
+                        close_track(tid,"SL")
+                        pnl_est=-abs(entry-sl)/(m["pip"])*0.01
+                        mem_record(_skey,"LOSS",round(pnl_est,4))
+                        notify_result(pair,side,entry,tp,sl,"SL",cur)
                 else:
-                    if cur<=tp: close_track(tid,"TP"); notify_result(pair,side,entry,tp,sl,"TP",cur)
-                    elif cur>=sl: close_track(tid,"SL"); notify_result(pair,side,entry,tp,sl,"SL",cur)
+                    if cur<=tp:
+                        close_track(tid,"TP")
+                        pnl_est=abs(entry-tp)/(m["pip"])*0.01
+                        mem_record(_skey,"WIN",round(pnl_est,4))
+                        notify_result(pair,side,entry,tp,sl,"TP",cur)
+                    elif cur>=sl:
+                        close_track(tid,"SL")
+                        pnl_est=-abs(sl-entry)/(m["pip"])*0.01
+                        mem_record(_skey,"LOSS",round(pnl_est,4))
+                        notify_result(pair,side,entry,tp,sl,"SL",cur)
             except: continue
     except Exception as e: log("WARN","check_open: {}".format(e))
 
@@ -1736,10 +2366,28 @@ def send_welcome(uid,uname):
 def send_account(uid,uname,forced=None):
     plan=forced or get_plan(uid); _,exp,_=get_pro_info(uid)
     refs=get_refs(uid); td=count_today(uid); lim={"FREE":FREE_LIMIT,"PRO":PRO_LIMIT,"VIP":999}.get(plan,FREE_LIMIT)
-    tg_send(uid,"👤 <b>MON COMPTE</b>\n"+"═"*22+"\n\n🆔 <code>{}</code>\n👤 @{}\n💎 Plan: <b>{}</b>{}\n"
-        "📡 Signaux: <b>{}/{}</b>\n🤝 Filleuls: <b>{}/{}</b>\n\n"
-        "{}" "📩 Support: @leaderOdg".format(uid,uname or "?",plan,"\n📅 Expire: {}".format(exp) if exp else "",td,lim,refs,REF_TARGET,
-        "✅ Accès PRO + Agent IA\n" if plan in ("PRO","VIP") else "🔒 /pay pour PRO complet\n"),kb=kb_main(plan in ("PRO","VIP")))
+    st=daily_stats(); ws=weekly_stats()
+    plan_ico = {"FREE":"👀 FREE","PRO":"💎 PRO","VIP":"👑 VIP"}.get(plan,"📋")
+    wr_d = int(st["wins"]/st["n"]*100) if st["n"] else 0
+    wr_w = int(ws["wins"]/ws["n"]*100) if ws["n"] else 0
+    tg_send(uid,
+        "👤 <b>MON COMPTE</b>\n"+"═"*22+"\n\n"
+        "🆔 <code>{}</code>\n"
+        "👤 @{}\n"
+        "📋 Statut : <b>{}</b>{}\n\n"
+        "📡 Signaux aujourd\'hui : <b>{}/{}</b>\n"
+        "🤝 Filleuls : <b>{}/{}</b>\n\n"
+        "📊 <b>PERFORMANCE</b>\n"
+        "  Aujourd\'hui : {} sig · {}% WR · +${} lot1\n"
+        "  Semaine     : {} sig · {}% WR · +${} lot1\n\n"
+        "{}📩 Support : @leaderOdg".format(
+            uid, uname or "?", plan_ico,
+            "\n📅 Expire : {}".format(exp) if exp else "",
+            td, lim, refs, REF_TARGET,
+            st["n"], wr_d, st["g1"],
+            ws["n"], wr_w, ws["g1"],
+            "✅ Acces PRO + Agent IA\n" if plan in ("PRO","VIP") else "🔒 /pay pour PRO complet\n"
+        ), kb=kb_main(plan in ("PRO","VIP")))
 
 def send_pay(uid):
     tg_send(uid,"💎 <b>PASSER EN PRO</b>\n"+"═"*22+"\n\n✅ {} signaux/jour\n✅ 20 marchés + crypto\n✅ \n✅ Agent IA Binance\n✅ Challenge 5$→500$\n\n💵 <b>PRIX: {}$ USDT TRC20</b>\n\n📤 Envoie sur:\n<code>{}</code>\n\nPuis clique <b>J'ai payé ✅</b>".format(PRO_LIMIT,PRO_PRICE,USDT_ADDR),
@@ -1803,21 +2451,46 @@ def send_admin_full(uid):
         ]})
 
 def send_guide(uid):
-    tg_send(uid,"📖 <b>GUIDE AlphaBot PRO v10</b>\n"+"═"*22+"\n\n"
-        "🧠 <b>Méthode ICT/SMC :</b>\n"
-        "1️⃣ H1 Bias (BOS/CHoCH) → tendance\n"
-        "2️⃣ M5 Breaker Block → zone d'entrée\n"
-        "3️⃣ Score dynamique 0-100 pts\n"
-        "4️⃣ SL/TP auto — RR min 1:2.5\n"
-        "5️⃣ OTE 61.8% + FVG + CHoCHx2\n\n"
+    tg_send(uid,
+        "📖 <b>GUIDE AlphaBot PRO v10</b>\n"+"═"*22+"\n\n"
+        "🧠 <b>STRATÉGIE ICT/SMC AVANCÉE (MULTI-TF)</b>\n\n"
+        "1️⃣ <b>H1 Bias (BOS / CHoCH)</b>\n"
+        "→ Tendance principale Smart Money\n\n"
+        "2️⃣ <b>M15 Order Block (OB)</b>\n"
+        "→ Zone institutionnelle d\'entrée haute probabilité\n\n"
+        "3️⃣ 🧨 <b>Prise de liquidité OBLIGATOIRE</b>\n"
+        "→ Sweep · Stop Hunt · EQH/EQL\n"
+        "→ Aucun signal sans manipulation détectée\n\n"
+        "4️⃣ 📊 <b>Score dynamique (0→115)</b>\n"
+        "→ Structure · Momentum · Liquidité · Sessions · Multi-TF\n\n"
+        "5️⃣ 🎯 <b>Confirmations avancées (bonus score) :</b>\n"
+        "  ✔️ OTE (Fib 61.8–78.6%)\n"
+        "  ✔️ FVG (Fair Value Gap)\n"
+        "  ✔️ CHoCH x2 (structure forte)\n"
+        "  ✔️ M1 aligné (timing sniper)\n"
+        "  ✔️ H&S · Double Top/Bot · Breakout · Fake BO (M5)\n\n"
+        "6️⃣ 💰 <b>Gestion automatique :</b>\n"
+        "  • SL intelligent (OB + volatilité ATR)\n"
+        "  • TP basé sur liquidité externe\n"
+        "  • <b>RR minimum : 1:3 🔥</b>\n\n"
+        "7️⃣ ⏱️ <b>Sessions optimisées :</b>\n"
+        "  🇬🇧 London Kill Zone · 🇺🇸 New York\n"
+        "  → Signaux hors session filtrés\n\n"
         "━"*20+"\n"
-        "🤖 <b>Agent IA Binance :</b>\n"
-        "• Régime marché auto (6 régimes)\n"
-        "• Mémoire épisodique + apprentissage\n"
-        "• Challenge 5$→500$ auto-géré\n\n"
-        "🔓 FREE: {}/j\n💎 PRO: {}/j + IA\n\n"
-        "⚠️ Risk 1-2% max. Not financial advice.".format(FREE_LIMIT,PRO_LIMIT),kb=kb_back())
-
+        "🤖 <b>IA Binance (PRO uniquement) :</b>\n"
+        "  • Régime marché auto (6 types)\n"
+        "  • Adaptation du risque en temps réel\n"
+        "  • Mémoire des setups gagnants\n"
+        "  • Challenge 5$→500$ géré automatiquement\n\n"
+        "━"*20+"\n"
+        "📊 FREE : {}/j  ·  💎 PRO : jusqu\'à {}/j\n\n"
+        "🔥 <b>Pourquoi AlphaBot est différent ?</b>\n"
+        "  ✔️ Seulement setups institutionnels\n"
+        "  ✔️ Filtrage liquidité = Smart Money\n"
+        "  ✔️ RR élevé = moins de trades, plus de gains\n"
+        "  ✔️ IA adaptative temps réel\n\n"
+        "⚠️ Risk 1–2% max par trade. Not financial advice.".format(FREE_LIMIT,PRO_LIMIT),
+        kb=kb_back())
 def send_broker(uid):
     tg_send(uid,"🏦 <b>BROKER — EXNESS</b>\n\n✅ Spread 0 pip (Raw)\n✅ Dépôt min 10$\n✅ FCA & CySEC\n✅ Crypto disponibles\n\n👉 <a href=\"{}\">🔗 Ouvrir Exness</a>".format(BROKER_LINK),kb=kb_back())
 
@@ -3714,7 +4387,7 @@ def get_adaptive_score_min():
     final = base + session_adj + regime_adj
     log("INFO", clr("Score min adaptatif: {} (base:{} sess:{:+d} regime:{:+d})".format(
         final, base, session_adj, regime_adj), "d"))
-    return max(72, min(95, final))
+    return max(85, min(95, final))
 
 
 
@@ -4105,6 +4778,7 @@ def kb_admin_full():
         [{"text":"✉️ Message → TOUS","callback_data":"adm_bcast_all"},{"text":"✉️ Message → PRO","callback_data":"adm_bcast_pro"}],
         [{"text":"📢 Messages Promo","callback_data":"adm_promo_list"},{"text":"🌍 État marchés","callback_data":"adm_marches"}],
         [{"text":"🏆 Challenge IA","callback_data":"challenge"},{"text":"🔧 Recommandations","callback_data":"adm_reco"}],
+        [{"text":"🧠 Mémoire IA","callback_data":"adm_memory"}],
     ]}
 
 def send_admin_full(uid):
@@ -4193,6 +4867,21 @@ def send_admin_reco(uid):
     for i,r in enumerate(recs,1): msg+="{}. {}\n\n".format(i,r)
     tg_send(uid,msg,kb=kb_admin_back())
 
+def send_admin_memory(uid):
+    if uid!=ADMIN_ID: return
+    best=best_setups(5); worst=worst_setups(5)
+    lines=["🧠 <b>MÉMOIRE IA — AlphaBot v10</b>","═"*22,"","🔥 <b>TOP 5 SETUPS GAGNANTS</b>",""]
+    for s in best:
+        lines.append("✅ <b>{}</b>".format(s["key"].replace("|"," · ")))
+        lines.append("   WR:<b>{}%</b>  {} trades  PnL:+${}".format(s["wr"],s["total"],s["pnl"]))
+    lines+=["","━"*20,"","💀 <b>TOP 5 SETUPS PERDANTS</b>",""]
+    for s in worst:
+        lines.append("❌ <b>{}</b>".format(s["key"].replace("|"," · ")))
+        lines.append("   WR:<b>{}%</b>  {} trades  PnL:{}$".format(s["wr"],s["total"],s["pnl"]))
+    if not best and not worst:
+        lines.append("⏳ Pas encore assez de données (min 5 trades par setup).")
+    tg_send(uid,"\n".join(l for l in lines if l is not None),kb=kb_admin_back())
+
 def handle_monstatus_full(uid):
     if uid!=ADMIN_ID: return
     plan,exp,src=get_pro_info(uid); total,pro,sigs,pays,g1d=global_stats()
@@ -4279,17 +4968,66 @@ def handle_resetcount(uid, target):
 
 # ── Messages Promo ───────────────────────────────────────────────
 PROMO_MSGS = [
-    {"id":"promo_excuse","label":"🙏 Excuses membres (messages)",
-     "text":"🙏 <b>Un mot de l\'équipe AlphaBot</b>\n\nCher(e) membre,\n\nNous tenons à nous excuser sincèrement pour le <b>volume important de messages</b> que vous avez reçu ces derniers jours.\n\nNous avons ajusté notre système pour vous envoyer <b>uniquement les signaux essentiels</b> — plus de bruit, plus de clarté.\n\n📡 Désormais vous recevrez :\n✅ Les signaux de trading directement\n✅ Les rapports journaliers/hebdomadaires\n✅ Les résultats TP/SL en temps réel\n\nMerci pour votre confiance et votre patience. 🙏\n\n<i>— @leaderOdg · Équipe AlphaBot PRO</i>"},
-    {"id":"promo_1","label":"📡 Accroche générale",
-     "text":"📡 <b>SIGNAUX TRADING EN TEMPS RÉEL</b>\n\nTu rates des trades faute d\'entrée précise ?\n\n🎯 Entrée + Stop Loss + Take Profit automatiques\n🤖 IA qui analyse 24h/24  ·  ⚡ \n\n📩 Rejoins AlphaBot maintenant\n➡️ @leaderodg_bot"},
-    {"id":"promo_2","label":"💰 Preuve sociale",
-     "text":"💰 <b>ILS GAGNENT. ET TOI ?</b>\n\nPendant que tu hésites, d\'autres exécutent 🚀\n\nOr · Forex · BTC · Indices US\nAnalyse ICT/SMC + ⚡ \n\n✅ Signal reçu  ✅ Entrée placée  ✅ TP atteint\n\n📩 Commence <b>GRATUIT</b>\n➡️ @leaderodg_bot"},
-    {"id":"promo_3","label":"⏰ Urgence / Opportunité",
-     "text":"⏰ <b>LE MARCHÉ N\'ATTEND PAS</b>\n\nChaque bougie est une opportunité...\n\nAlphaBot scanne <b>EURUSD · GBPJPY · XAUUSD · NAS100</b>\net t\'envoie le signal avec l\'entrée exacte 🎯\n\n🆓 2 signaux gratuits/jour\n💎 PRO = jusqu\'à 10 signaux/jour\n\n📩 Lance-toi\n➡️ @leaderodg_bot"},
+    {"id":"promo_excuse","label":"🙏 Excuses membres",
+     "text":(
+        "🙏 <b>Un mot de l\'équipe AlphaBot</b>\n\n"
+        "Cher membre,\n\n"
+        "Nous avons ajusté notre système pour vous envoyer "
+        "uniquement les signaux essentiels — plus de clarté, moins de bruit.\n\n"
+        "📡 Désormais :\n"
+        "✅ Signaux filtrés (score ≥ 85/100 uniquement)\n"
+        "✅ Rapport de performance chaque soir\n"
+        "✅ Résultats TP/SL transparents\n\n"
+        "Merci pour votre confiance. 🙏\n\n"
+        "<i>— @leaderOdg · AlphaBot PRO v10</i>"
+     )},
+    {"id":"promo_1","label":"📊 Réveil doux",
+     "text":(
+        "📊 <b>Soyons honnêtes.</b>\n\n"
+        "Si tu suis uniquement les signaux gratuits,\n"
+        "tu vois les opportunités passer… sans pouvoir agir pleinement.\n\n"
+        "👉 Les meilleurs setups sont filtrés.\n\n"
+        "🎯 AlphaBot PRO n\'est pas fait pour regarder,\n"
+        "mais pour agir avec précision.\n\n"
+        "La question est simple :\n"
+        "Tu veux continuer à observer, ou commencer à progresser ?\n\n"
+        "💎 /pay — accès PRO\n"
+        "📩 @leaderodg_bot"
+     )},
+    {"id":"promo_2","label":"🎯 Rareté + qualité",
+     "text":(
+        "🎯 <b>Aujourd\'hui sur AlphaBot PRO :</b>\n\n"
+        "Seulement quelques setups propres ont passé les filtres.\n\n"
+        "✔️ Liquidité Smart Money confirmée\n"
+        "✔️ Order Block M15 validé\n"
+        "✔️ RR minimum 1:3\n\n"
+        "📉 Le marché ne donne pas beaucoup d\'opportunités propres.\n"
+        "📈 Mais ceux qui sont bien positionnés en profitent.\n\n"
+        "💎 Moins de trades, meilleure précision.\n"
+        "👉 @leaderodg_bot  →  /pay"
+     )},
+    {"id":"promo_3","label":"💡 Preuve + doute",
+     "text":(
+        "🤔 <b>Beaucoup pensent que le problème vient du marché…</b>\n\n"
+        "Mais souvent, c\'est le timing et la précision de l\'entrée.\n\n"
+        "👉 AlphaBot PRO filtre justement ces erreurs :\n\n"
+        "  ✔️ Moins de signaux\n"
+        "  ✔️ Meilleures entrées\n"
+        "  ✔️ Cohérence sur la durée\n\n"
+        "Ceux qui comprennent ça changent leur résultat.\n\n"
+        "💎 /pay — {}$ USDT\n"
+        "📩 @leaderodg_bot"
+     ).format(PRO_PRICE)},
     {"id":"promo_4","label":"📊 Résultats du jour","text":None},
-    {"id":"promo_5","label":"🆓 FREE vs 💎 PRO",
-     "text":"🆓 <b>GRATUIT</b> ou 💎 <b>PRO ?</b>\n\n🆓 FREE → 2 signaux/jour\n💎 PRO → jusqu\'à 10 signaux/jour\n  + Analyse ICT complète\n  + ⚡ \n  + Rapports quotidiens\n  + Agent IA Binance (Challenge 5$→500$)\n\nTout ça pour seulement <b>10$ USDT</b> 💵\nOu <b>30 filleuls = 3 mois PRO GRATUIT</b> 🤝\n\n📩 @leaderodg_bot"},
+    {"id":"promo_5","label":"🤝 Parrainage",
+     "text":(
+        "🤝 <b>Programme Parrainage AlphaBot</b>\n\n"
+        "Invite {} personnes → accès PRO offert ({} mois) 🎁\n\n"
+        "Tu progresses avec ton réseau.\n"
+        "Plus tu partages de valeur, plus tu en reçois.\n\n"
+        "👉 Utilise /ref pour obtenir ton lien personnalisé.\n\n"
+        "📩 @leaderodg_bot"
+     ).format(REF_TARGET, REF_MONTHS)},
 ]
 
 def _build_promo(pid):
@@ -4764,6 +5502,16 @@ def dispatch(uid, uname, txt):
         if cmd == "stop":
             tg_send(uid, "🛑 Bot arrêté.")
             raise KeyboardInterrupt
+        # ── Commandes PaymentManager PRO ─────────────────────────
+        if cmd == "paydash" and _PM_AVAILABLE:
+            from alphabot_payment_manager import cmd_paydash
+            cmd_paydash(uid); return
+        if cmd == "activate" and _PM_AVAILABLE:
+            from alphabot_payment_manager import cmd_activate_manual
+            cmd_activate_manual(uid, arg); return
+        if cmd == "degrade" and _PM_AVAILABLE:
+            from alphabot_payment_manager import cmd_degrade_manual
+            cmd_degrade_manual(uid, arg); return
 
     # ── Fallback : afficher le menu ───────────────────────────────
     send_welcome(uid, uname)
@@ -4778,6 +5526,14 @@ def dispatch_cb(cb):
     try: tg_req("answerCallbackQuery", {"callback_query_id": cb["id"]})
     except: pass
     db_register(uid, uname)
+
+    # ── PaymentManager intercepte les callbacks paiement EN PREMIER ──
+    if _PM_AVAILABLE:
+        try:
+            if _PM.process_callback(uid, uname, data):
+                return  # callback consommé par PaymentManager
+        except Exception as _e:
+            log("WARN", "PM.process_callback: {}".format(_e))
 
     # ── Navigation principale ─────────────────────────────────
     if   data == "start":   send_welcome(uid, uname)
@@ -5072,6 +5828,14 @@ def process_update(upd):
             if txt:
                 log("INFO", clr("MSG @{} ({}): {}".format(uname or uid, uid, txt[:40]), "d"))
                 def _h(uid=uid, uname=uname, txt=txt):
+                    # ── PaymentManager intercepte EN PREMIER ──────────────
+                    if _PM_AVAILABLE:
+                        try:
+                            if _PM.process_text(uid, uname, txt):
+                                return  # message consommé par PaymentManager
+                        except Exception as _e:
+                            log("WARN", "PM.process_text: {}".format(_e))
+                    # ── Fallback : logique paiement existante ─────────────
                     if uid in _pay_state and _pay_state[uid].get("step") == "waiting":
                         cleaned = txt.strip()
                         if len(cleaned) >= 20 and not cleaned.startswith("/"):
@@ -5093,6 +5857,253 @@ def process_update(upd):
             threading.Thread(target=dispatch_cb, args=(cb,), daemon=True).start()
     except Exception as e: log("ERR","process_update: {}".format(e))
 
+
+# ══════════════════════════════════════════════════════════════════
+#  PANEL ADMIN FLASK — Port 5001 (patch auto, séparé du webhook)
+# ══════════════════════════════════════════════════════════════════
+
+_ADMIN_PANEL_HTML = None
+_flask_secret = os.getenv("SECRET_KEY", "ab10-secret-" + str(ADMIN_ID))
+_ADMIN_WEB_USER = os.getenv("ADMIN_WEB_USER", "admin")
+_ADMIN_WEB_PASS = os.getenv("ADMIN_WEB_PASS", "AlphaBot2024!")
+_FLASK_PORT     = int(os.getenv("FLASK_PORT", "5001"))
+
+def _load_admin_html():
+    global _ADMIN_PANEL_HTML
+    try:
+        with open("admin_panel.html", encoding="utf-8") as f:
+            _ADMIN_PANEL_HTML = f.read()
+    except FileNotFoundError:
+        _ADMIN_PANEL_HTML = "<h2>admin_panel.html manquant.</h2>"
+
+def _require_login_flask(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _session.get("ok"):
+            return _redirect(_url_for("fl_login"))
+        return f(*args, **kwargs)
+    return decorated
+
+def _start_flask_admin():
+    if not _FLASK_OK: return
+    _load_admin_html()
+    fl = _Flask("alphabot_admin")
+    fl.secret_key = _flask_secret
+
+    @fl.route("/")
+    def fl_index():
+        return _jsonify({"status":"AlphaBot v10 actif","port":_FLASK_PORT})
+
+    @fl.route("/ping")
+    def fl_ping():
+        return "pong", 200
+
+    @fl.route("/login", methods=["GET","POST"])
+    def fl_login():
+        err = ""
+        if _request.method == "POST":
+            if (_request.form.get("u") == _ADMIN_WEB_USER and
+                    _request.form.get("p") == _ADMIN_WEB_PASS):
+                _session["ok"] = True
+                return _redirect(_url_for("fl_admin"))
+            err = "Identifiants incorrects."
+        html = """<!DOCTYPE html><html><head><meta charset=UTF-8>
+<title>AlphaBot Login</title>
+<style>body{background:#0a0a0f;display:flex;align-items:center;justify-content:center;
+min-height:100vh;font-family:sans-serif;margin:0}
+.card{background:#14141f;border:1px solid rgba(255,255,255,.08);border-radius:16px;
+padding:40px 32px;width:320px}
+h1{color:#fff;font-size:20px;margin-bottom:24px;text-align:center}
+input{width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);
+border-radius:8px;padding:11px 14px;color:#fff;font-size:14px;box-sizing:border-box;
+margin-bottom:12px;outline:none}
+button{width:100%;background:#3d7eff;border:none;border-radius:8px;padding:12px;
+color:#fff;font-size:14px;cursor:pointer;font-weight:700}
+.err{color:#fca5a5;font-size:13px;text-align:center;margin-top:8px}
+</style></head><body><div class="card">
+<h1>🤖 AlphaBot Admin</h1>
+<form method=POST>
+<input name=u placeholder=Identifiant required>
+<input name=p type=password placeholder='Mot de passe' required>
+<button>🔐 Connexion</button>
+</form>""" + (f'<p class=err>{err}</p>' if err else '') + "</div></body></html>"
+        return html
+
+    @fl.route("/logout")
+    def fl_logout():
+        _session.clear(); return _redirect(_url_for("fl_login"))
+
+    @fl.route("/admin")
+    @_require_login_flask
+    def fl_admin():
+        return _ADMIN_PANEL_HTML or "<h2>Panel en cours de chargement…</h2>"
+
+    @fl.route("/api/stats")
+    @_require_login_flask
+    def fl_stats():
+        try:
+            total, pro, sigs, pays, g1d = global_stats()
+            st = daily_stats()
+            sn, sm, sl_l, wknd = get_session()
+            return _jsonify({
+                "total": total, "pro": pro, "free": total-pro,
+                "sigs": sigs, "pays": pays, "revenue": round(g1d, 2),
+                "new_today": 0,
+                "pay_pending": len(pending_pays()),
+                "activations": pays,
+                "signals_sent": _cycles_no_signal,
+                "last_scan": datetime.now().strftime("%H:%M"),
+                "uptime_since": datetime.now().isoformat(),
+                "bot_running": True,
+            })
+        except Exception as e:
+            return _jsonify({"error": str(e)})
+
+    @fl.route("/api/users")
+    @_require_login_flask
+    def fl_users():
+        try:
+            page   = int(_request.args.get("page", 1))
+            q      = _request.args.get("q", "")
+            fltr   = _request.args.get("filter", "ALL")
+            limit  = 20
+            offset = (page - 1) * limit
+            con = _conn(); cur = con.cursor()
+            conds = []; args = []
+            if q:
+                conds.append("(username LIKE ? OR CAST(user_id AS TEXT) LIKE ?)")
+                args += [f"%{q}%", f"%{q}%"]
+            if fltr == "PRO":
+                conds.append("plan='PRO'")
+            elif fltr == "FREE":
+                conds.append("plan='FREE'")
+            where = ("WHERE " + " AND ".join(conds)) if conds else ""
+            cur.execute(f"SELECT COUNT(*) FROM users {where}", args)
+            total = cur.fetchone()[0]
+            cur.execute(
+                f"SELECT user_id,username,plan,pro_source,joined,pro_expires "
+                f"FROM users {where} ORDER BY joined DESC LIMIT ? OFFSET ?",
+                args + [limit, offset])
+            rows = [{"user_id":r[0],"username":r[1],"status":r[2],
+                     "pro_since":r[3],"join_date":r[4],"pro_expires":r[5]}
+                    for r in cur.fetchall()]
+            con.close()
+            return _jsonify({"users": rows, "total": total, "page": page})
+        except Exception as e:
+            return _jsonify({"users":[],"total":0,"page":1,"error":str(e)})
+
+    @fl.route("/api/activate", methods=["POST"])
+    @_require_login_flask
+    def fl_activate():
+        try:
+            data = _request.get_json()
+            uid  = int(data.get("user_id", 0))
+            plan = data.get("plan", "PRO")
+            days_map = {"PRO": None, "MONTH": 30, "VIP": None, "TRIAL": 3}
+            days = days_map.get(plan)
+            db_pro(uid, f"ADMIN_WEB_{plan}", days=days)
+            tg_send(uid,
+                f"💎 <b>Compte {plan} activé !</b>\n\n"
+                f"Ton accès a été activé par l'admin.\n"
+                f"🤖 AlphaBot PRO · @{BOT_USER}")
+            return _jsonify({"ok": True, "user_id": uid, "plan": plan})
+        except Exception as e:
+            return _jsonify({"ok": False, "error": str(e)})
+
+    @fl.route("/api/degrade", methods=["POST"])
+    @_require_login_flask
+    def fl_degrade():
+        try:
+            data = _request.get_json()
+            uid  = int(data.get("user_id", 0))
+            db_free(uid)
+            tg_send(uid,
+                f"ℹ️ Compte rétrogradé en FREE.\n"
+                f"Tape /pay pour renouveler.\n🤖 AlphaBot")
+            return _jsonify({"ok": True, "user_id": uid})
+        except Exception as e:
+            return _jsonify({"ok": False, "error": str(e)})
+
+    @fl.route("/api/broadcast/text", methods=["POST"])
+    @_require_login_flask
+    def fl_bcast_text():
+        try:
+            data    = _request.get_json()
+            msg_txt = data.get("message", "").strip()
+            target  = data.get("target", "ALL")
+            if not msg_txt:
+                return _jsonify({"ok": False, "error": "Message vide"})
+            uids = pro_users() if target == "PRO" else (pro_users() + free_users())
+            sent = failed = 0
+            for u in uids:
+                try:
+                    r = tg_send(u, f"📢 <b>Message AlphaBot</b>\n\n{msg_txt}")
+                    if r.get("ok"): sent += 1
+                    else: failed += 1
+                except: failed += 1
+                time.sleep(0.05)
+            return _jsonify({"ok": True, "sent": sent, "failed": failed})
+        except Exception as e:
+            return _jsonify({"ok": False, "error": str(e)})
+
+    @fl.route("/api/payments/pending")
+    @_require_login_flask
+    def fl_pay_pending():
+        try:
+            pend = pending_pays()
+            rows = [{"id":r[0],"user_id":r[1],"username":r[2],
+                     "tx_hash":r[3],"plan_key":"PRO","amount_exp":PRO_PRICE,
+                     "amount_rcv":0,"status":"PENDING","created_at":r[4]}
+                    for r in pend]
+            return _jsonify({"payments": rows})
+        except Exception as e:
+            return _jsonify({"payments": [], "error": str(e)})
+
+    @fl.route("/api/payments/history")
+    @_require_login_flask
+    def fl_pay_history():
+        try:
+            rows_db = db_all(
+                "SELECT id,user_id,amount,tx_hash,status,created "
+                "FROM payments WHERE status='CONFIRMED' "
+                "ORDER BY created DESC LIMIT 50")
+            rows = [{"id":r[0],"user_id":r[1],"amount_rcv":r[2],
+                     "tx_hash":r[3],"status":r[4],"activated_at":r[5],
+                     "plan_key":"PRO","username":""}
+                    for r in rows_db]
+            return _jsonify({"history": rows})
+        except Exception as e:
+            return _jsonify({"history": [], "error": str(e)})
+
+    @fl.route("/api/broadcasts")
+    @_require_login_flask
+    def fl_broadcasts():
+        # Pas de table broadcasts dans main_v10 → retourner vide
+        return _jsonify({"broadcasts": []})
+
+    @fl.route("/api/bot/status")
+    @_require_login_flask
+    def fl_bot_status():
+        return _jsonify({
+            "running": True,
+            "last_scan": datetime.now().strftime("%H:%M"),
+            "signals_sent": _cycles_no_signal,
+            "uptime_since": datetime.now().isoformat(),
+        })
+
+    import logging as _logging
+    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
+
+    fl.run(
+        host="0.0.0.0",
+        port=_FLASK_PORT,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
+
+# ══════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════
 #  DÉMARRAGE & MAIN
 # ══════════════════════════════════════════════════════
@@ -5129,6 +6140,34 @@ def startup():
         except Exception as e:
             log("WARN", "notify startup: {}".format(e))
     threading.Thread(target=_notify, daemon=True).start()
+    # ── Initialiser le Payment Manager ─────────────────────────────
+    if _PM_AVAILABLE:
+        try:
+            _PM.init({
+                "tg_send"    : tg_send,
+                "tg_sticker" : tg_sticker,
+                "db_pro"     : lambda uid, src, days=None: db_pro(uid, src, days),
+                "db_free"    : db_free,
+                "admin_id"   : ADMIN_ID,
+                "usdt_addr"  : USDT_ADDR,
+                "pro_price"  : PRO_PRICE,
+                "pro_limit"  : PRO_LIMIT,
+                "bot_user"   : BOT_USER,
+                "db_file"    : DB_FILE,
+            })
+            log("INFO", clr("PaymentManager PRO initialisé ✅", "b", "g"))
+        except Exception as _e:
+            log("WARN", "PM.init erreur: {}".format(_e))
+
+    # ── Démarrer le panel admin Flask (port 5001) ────────────────
+    if _FLASK_OK:
+        try:
+            _t = threading.Thread(target=_start_flask_admin, daemon=True, name="FlaskAdmin")
+            _t.start()
+            log("INFO", clr("Panel admin Flask démarré → port 5001", "b", "g"))
+        except Exception as _e:
+            log("WARN", "Flask admin erreur: {}".format(_e))
+
     log("INFO", clr("AlphaBot v10 actif", "b", "g")); return True
 
 def make_wh():
