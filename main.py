@@ -4,7 +4,6 @@
 AlphaBot PRO v10 — Agent IA Adaptatif
 • Bot Telegram FREE/PRO/VIP + paiement USDT auto
 • 20 marchés Forex/Métaux/Crypto/Indices/Pétrole
-• Cerveau ICT/SMC v2 + Mode IMPROVISATION
 • Si pas de setup parfait → l'agent allège les critères
   si tendance de fond + session + broker sont valides
 • Challenge IA 5$→500$ (Binance simulation)
@@ -892,32 +891,7 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
                              "badges":" · ".join(badges_full),"time":datetime.now(timezone.utc).strftime("%H:%M"),
                              "liq":liq,"mode":"NORMAL","risk_mult":1.0}
 
-        # ── MODE IMPROVISATION : uniquement après 500 cycles sans signal ICT ──
-        if not sig and improv_unlocked:
-            # Cooldown par paire : 4h minimum entre deux improv sur la même paire
-            last_improv_ts = _improv_cd.get(m["name"], 0)
-            if time.time() - last_improv_ts < 1 * 3600:
-                # Cooldown actif → pas d'improv
-                pass
-            else:
-                improv = improv_analyze(m, b, h1, m5, sn, news_ok)
-                if improv and improv["rr"] >= 2.5:   # RR minimum 2.5 pour improv
-                    e = improv["entry"]; tp = improv["tp"]; sl_v = improv["sl"]
-                    dp = 2 if e > 1000 else (3 if e > 10 else 5)
-                    f  = lambda v: round(v, dp); pip = m["pip"]
-                    gain = abs(tp - e); risk = abs(e - sl_v)
-                    ptp  = gain / pip;  psl  = risk / pip
-                    sig  = {"name":m["name"],"cat":m["cat"],"side":improv["side"],
-                            "entry":f(e),"tp":f(tp),"sl":f(sl_v),"rr":improv["rr"],
-                            "score":improv["score"],"score_min":s_min,"atr":f(a),"sp":sp,
-                            "bias":b,"btype":bt,
-                            "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
-                            "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                            "badges":"Mode: {}".format(improv["mode"]),
-                            "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                            "mode":improv["mode"],"risk_mult":improv["risk_mult"],
-                            "improv":True,
-                            "improv_cycles":_cycles_no_signal}  # info cycles pour le message
+        # Improvisation supprimée
 
         if sig:
             q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,
@@ -1297,7 +1271,7 @@ def fmt_pro(s, news, sl_label):
         f"│  {sc_lbl}  [{bar}]",
         f"│  Tendance : <b>{s['bias']}</b>  ({s['btype']})",
         f"│  Mode     : <b>{mode_lbl}</b>",
-        f"│  {s.get('badges', '—')}",
+        f"│  {s.get('badges', '—')}" if s.get('badges') and not s.get('improv') else None,
         "└───────────────────────────",
         "",
         f"📰 News: {news_lbl}  ·  Spread: {sp_s}",
@@ -1427,7 +1401,7 @@ def fmt_daily(st):
 #  BOUCLE SCAN
 # ══════════════════════════════════════════════════════
 _sent=set(); _sent_lk=threading.Lock()
-_last_d=""; _last_w=""; _scan_run=False; _test_mode=""
+_last_d=""; _last_w=""; _scan_run=False; _scan_lock=threading.Lock(); _test_mode=""
 _last_results=[]; _pay_state={}
 # ── Compteur improv ──────────────────────────────────────────────────
 _cycles_no_signal = 0          # cycles consécutifs sans aucun signal ICT
@@ -1540,10 +1514,13 @@ def _send_session_report(sess_label, end_hour):
 
 def scan_and_send():
     global _scan_run
-    if _scan_run: return
-    _scan_run=True
-    try: _scan_inner()
-    finally: _scan_run=False
+    if not _scan_lock.acquire(blocking=False): return  # déjà en cours
+    try:
+        _scan_run=True
+        _scan_inner()
+    finally:
+        _scan_run=False
+        _scan_lock.release()
 
 def _scan_inner():
     global _last_d, _last_w, _last_results, _cycles_no_signal
@@ -1553,7 +1530,7 @@ def _scan_inner():
     sn, sm, sl_l, wknd = get_session()
     sm = get_adaptive_score_min()
     # Improv autorisé seulement après IMPROV_UNLOCK_CYCLES cycles sans signal ICT
-    improv_unlocked = (_cycles_no_signal >= IMPROV_UNLOCK_CYCLES)
+    improv_unlocked = False  # Improvisation désactivée
     log("INFO", clr("Scan {} — {} — Score~{} | No-sig cycles: {}/{}{}".format(
         scan_t, sl_l, sm, _cycles_no_signal, IMPROV_UNLOCK_CYCLES,
         " ⚡IMPROV OK" if improv_unlocked else ""), "d"))
@@ -1710,23 +1687,9 @@ def check_open_sigs():
     except Exception as e: log("WARN","check_open: {}".format(e))
 
 def notify_result(pair, side, entry, tp, sl, result, cur):
-    icon  = "✅" if result == "TP" else "❌"
-    label = "TP ATTEINT 💰" if result == "TP" else "SL TOUCHÉ ⚠️"
-    d     = "⬆️" if side == "BUY" else "⬇️"
-    sep   = "━" * 20
-    # NOTE: parenthèses obligatoires pour que .format() couvre TOUT le template
-    msg = (
-        f"{icon} <b>RÉSULTAT — {pair}</b>  {d}\n"
-        f"{sep}\n"
-        f"<b>{label}</b>\n"
-        f"📍 Entrée : <code>{entry}</code>\n"
-        f"📌 Prix   : <code>{cur}</code>\n"
-        f"✅ TP     : <code>{tp}</code>\n"
-        f"❌ SL     : <code>{sl}</code>\n"
-        f"🤖 AlphaBot  ·  @leaderodg_bot"
-    )
-    tg_send(CHANNEL_ID, msg)
-    for puid in pro_users(): tg_send(puid, msg); time.sleep(0.04)
+    # Résultats TP/SL uniquement le soir (>= DAILY_HOUR)
+    if datetime.now(timezone.utc).hour < DAILY_HOUR:
+        return  # silencieux pendant la journée
 
 # ══════════════════════════════════════════════════════
 #  PAIEMENT USDT
@@ -2292,29 +2255,9 @@ def _make_pdf_placeholder():
 
 
 def _notify_result(pair, side, entry, tp, sl, result, current):
-    """Notifie tous les utilisateurs du résultat d'un signal."""
-    icon   = "\u2705" if result == "TP" else "\u274c"
-    label  = "TP ATTEINT \U0001f4b0" if result == "TP" else "SL TOUCHÉ \u26a0\ufe0f"
-    d      = "\u2b06\ufe0f" if side == "BUY" else "\u2b07\ufe0f"
-    sf     = "ACHAT" if side == "BUY" else "VENTE"
-    msg    = (
-        "{} <b>RÉSULTAT \u2014 {}</b>  {}\n".format(icon, pair, d) +
-        "\u2501" * 20 + "\n\n"
-        "<b>{}</b>\n\n"
-        "\U0001f4cd Entrée : <code>{}</code>\n"
-        "\U0001f3af Prix actuel : <code>{}</code>\n"
-        "\u2705 TP : <code>{}</code>  \u274c SL : <code>{}</code>\n\n"
-        "\U0001f916 AlphaBot PRO \u00b7 @leaderodg_bot"
-    ).format(label, entry, current, tp, sl)
-    # Envoyer au canal et à tous les users
-    tg_send(CHANNEL_ID, msg)
-    for puid in db_get_pro_users():
-        tg_send(puid, msg); time.sleep(0.04)
-    for fuid in db_get_free_users():
-        tg_send(fuid, msg); time.sleep(0.04)
-    log("SIGNAL", clr("Résultat {} : {} {} → {}".format(pair, sf, entry, result), "green"))
-
-
+    # Résultats TP/SL uniquement le soir (>= DAILY_HOUR)
+    if datetime.now(timezone.utc).hour < DAILY_HOUR:
+        return  # silencieux pendant la journée
 
 def _relance_inactifs():
     """Envoie un message de relance aux utilisateurs FREE inactifs."""
