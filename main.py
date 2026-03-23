@@ -670,13 +670,13 @@ def improv_analyze(m, b, h1, m5, sn, news_ok):
 
     risk = abs(entry - sl)
     gain = abs(tp - entry)
-    if risk <= 0 or gain / risk < 3.0: return None  # RR min 3.0 pour improv
+    if risk <= 0 or gain / risk < 2.5: return None  # RR min 2.5 pour improv
 
     # Bonus session (+0 à +10)
     sc += int(sess_qual * 10)
 
-    # Score minimum 75 obligatoire — sinon on n'improvise pas
-    if sc < 75: return None
+    # Score minimum 55 — improvisation très agressive
+    if sc < 55: return None
 
     return {"improv": True, "mode": mode_name, "side": side,
             "entry": entry, "sl": sl, "tp": tp,
@@ -805,9 +805,9 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
         if b=="NEUTRAL":
             q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Neutre","improv":False}); return
         time.sleep(0.1)
-        m5=fetch_c(m["sym"],"5m","5d") or fetch_c(m["sym"],"15m","10d")
+        m5=fetch_c(m["sym"],"15m","10d") or fetch_c(m["sym"],"5m","5d")
         if not m5 or len(m5)<10:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"M5 indispo","improv":False}); return
+            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"M15 indispo","improv":False}); return
 
         # ── Vérif spread ─────────────────────────────
         last5=[abs(x["h"]-x["l"]) for x in m5[-5:] if x["h"]!=x["l"]]
@@ -896,12 +896,12 @@ def agent_analyze(m, score_min, news_ok, q, improv_unlocked=False):
         if not sig and improv_unlocked:
             # Cooldown par paire : 4h minimum entre deux improv sur la même paire
             last_improv_ts = _improv_cd.get(m["name"], 0)
-            if time.time() - last_improv_ts < 4 * 3600:
+            if time.time() - last_improv_ts < 1 * 3600:
                 # Cooldown actif → pas d'improv
                 pass
             else:
                 improv = improv_analyze(m, b, h1, m5, sn, news_ok)
-                if improv and improv["rr"] >= 3.0:   # RR minimum 3.0 pour improv
+                if improv and improv["rr"] >= 2.5:   # RR minimum 2.5 pour improv
                     e = improv["entry"]; tp = improv["tp"]; sl_v = improv["sl"]
                     dp = 2 if e > 1000 else (3 if e > 10 else 5)
                     f  = lambda v: round(v, dp); pip = m["pip"]
@@ -1308,67 +1308,48 @@ def fmt_pro(s, news, sl_label):
     return "\n".join(l for l in lines if l is not None)
 
 def fmt_free(s, news, sl_label):
-    se  = "🟢" if s["side"] == "BUY" else "🔴"
-    sf  = "ACHAT" if s["side"] == "BUY" else "VENTE"
-    emo = CAT_EMO.get(s["cat"], "📊")
-    sep = "═" * 22
+    se    = "🟢" if s["side"] == "BUY" else "🔴"
+    sf    = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo   = CAT_EMO.get(s["cat"], "📊")
+    sep   = "═" * 22
+    arrow = "📈" if s["side"] == "BUY" else "📉"
+    liq   = s.get("liq") or {}
 
-    if s.get("improv"):
-        # ── Message improv : très explicite + warning rouge ─────────
-        tf_used = "M5/H1"   # timeframes utilisés pour l'improv
-        cycles  = s.get("improv_cycles", "500+")
-        lines = [
-            f"🚨 <b>⚡ SIGNAL IMPROVISATION ⚡</b> 🚨",
-            sep,
-            f"⚠️ <b>ATTENTION — Setup allégé</b>",
-            f"📌 Déclenché après <b>{cycles}</b> cycles sans signal ICT",
-            f"⏱ Timeframe analysé : <b>{tf_used}</b>",
-            f"🧠 Mode : <b>{s.get('mode', 'IMPROV')}</b>",
-            sep,
-            f"{se} <b>{sf} — {s['name']}</b>  {emo}",
-            f"📍 Entrée  : <code>{s['entry']}</code>",
-            f"❌ SL      : <code>{s['sl']}</code>",
-            f"✅ TP      : <code>{s['tp']}</code>",
-            f"📐 RR      : <b>1:{s['rr']}</b>",
-            f"🎯 Score   : <b>{s['score']}/100</b>",
-            sep,
-            f"💵 Lot 0.01 : <b>+${s['g001']}</b>  si TP  /  <b>-${s['l001']}</b>  si SL",
-            f"💰 Lot 1.00 : <b>+${s['g1']}</b>  si TP  /  <b>-${s['l1']}</b>  si SL",
-            sep,
-            "⚠️ <b>Risque réduit recommandé (50% taille normale)</b>",
-            "🔒 Analyse ICT complète → PRO " + str(PRO_PRICE) + "$ USDT",
-            "🤖 AlphaBot  ·  @leaderodg_bot",
-        ]
+    if s["score"] >= 85:
+        hook = "🔥 <b>Setup PREMIUM — Score élite</b>"
+    elif s["score"] >= 75:
+        hook = "💎 <b>Setup ICT confirmé — Haute confiance</b>"
+    elif s.get("improv"):
+        hook = "⚡ <b>Setup allégé — Mode Improvisation</b>"
     else:
-        # ── Message signal ICT normal — style confiant ───────────────
-        liq      = s.get("liq") or {}
-        sc_lbl   = _score_label(s["score"])
-        arrow    = "📈" if s["side"] == "BUY" else "📉"
-        # Accroche selon score
-        if s["score"] >= 85:
-            hook = "🔥 Setup PREMIUM · Confluence maximale"
-        elif s["score"] >= 75:
-            hook = "💎 Setup qualité · ICT confirmé"
-        else:
-            hook = "📊 Setup validé · Conditions réunies"
+        hook = "📊 <b>Setup valide — Conditions réunies</b>"
 
-        lines = [
-            f"{arrow} {se} <b>{s['name']} — {sf}</b>  {emo}",
-            sep,
-            f"<i>{hook}</i>",
-            f"💧 <b>{liq.get('label', 'Liquidité ✓')}</b>" if liq else "💧 Liquidité confirmée ✓",
-            "",
-            f"📍 Entrée : <code>{s['entry']}</code>",
-            f"✅ TP     : <code>{s['tp']}</code>",
-            f"❌ SL     : <code>{s['sl']}</code>",
-            f"📐 RR : <b>1:{s['rr']}</b>  ·  {sc_lbl}",
-            "",
-            f"💵 Lot 0.01 : <b>+${s['g001']}</b>  /  💰 Lot 1.00 : <b>+${s['g1']}</b>",
-            "",
-            "─" * 22,
-            "🔒 <b>Analyse complète PRO</b> → " + str(PRO_PRICE) + "$ USDT",
-            "📩 @leaderodg_bot  ·  🤖 AlphaBot",
-        ]
+    lines = [
+        f"{arrow} {se} <b>{s['name']} — {sf}</b>  {emo}",
+        sep,
+        hook,
+        f"💧 <b>{liq.get('label', 'Liquidité ✓')}</b>" if liq else "💧 Liquidité confirmée ✓",
+        "",
+        f"📍 Entrée : <code>{s['entry']}</code>",
+        f"✅ TP     : <code>{s['tp']}</code>",
+        f"❌ SL     : <code>{s['sl']}</code>",
+        f"📐 RR     : <b>1:{s['rr']}</b>  ·  🎯 Score : <b>{s['score']}/100</b>",
+        "",
+        f"💵 Lot 0.01 : <b>+${s['g001']}</b>  /  💰 Lot 1.00 : <b>+${s['g1']}</b>",
+        "",
+        sep,
+        "🚨 <b>Tu vois ce signal FREE ?</b>",
+        f"Les membres PRO en reçoivent <b>10/jour</b> comme ça.",
+        f"Toi tu en as droit à <b>{FREE_LIMIT} seulement.</b> 😬",
+        "",
+        "⏳ Pendant que tu attends ton prochain signal,",
+        "<b>les PRO exécutent déjà les suivants.</b>",
+        "",
+        f"💎 <b>Passe PRO — seulement {PRO_PRICE}$ USDT</b>",
+        "👉 @leaderodg_bot  →  /pay",
+        sep,
+        "🤖 AlphaBot PRO  ·  @leaderodg_bot",
+    ]
     return "\n".join(l for l in lines if l is not None)
 
 def fmt_scan(results,news,scan_t,sl_l,sm,nb):
@@ -1450,7 +1431,7 @@ _last_d=""; _last_w=""; _scan_run=False; _test_mode=""
 _last_results=[]; _pay_state={}
 # ── Compteur improv ──────────────────────────────────────────────────
 _cycles_no_signal = 0          # cycles consécutifs sans aucun signal ICT
-IMPROV_UNLOCK_CYCLES = 500     # seuil pour autoriser l'improvisation
+IMPROV_UNLOCK_CYCLES = 0       # ⚡ Improvisation TOUJOURS active (seuil = 0)
 _improv_cd = {}                # {pair_name: timestamp} cooldown par paire
 # v13 compat aliases
 _sent_lock         = _sent_lk
@@ -1643,11 +1624,7 @@ def _scan_inner():
                 tg_send(fuid, "🛑 <b>Limite FREE {}/{}</b>\n\n/pay — {}$ USDT\n{} filleuls = {} mois PRO!".format(
                     FREE_LIMIT, FREE_LIMIT, PRO_PRICE, REF_TARGET, REF_MONTHS))
                 count_incr(fuid)
-    if sigs:
-        report = fmt_scan(results, news_lbl, scan_t, sl_l, sm, len(sigs))
-        tg_send(CHANNEL_ID, report); tg_send(ADMIN_ID, report)
-    for puid in pru_eff:
-        if puid != ADMIN_ID and sigs: tg_send(puid, report); time.sleep(0.04)
+    # Scan summary supprimé — disponible uniquement via /scan ou /debug
     # Rapport quotidien
     if int(hs)>=DAILY_HOUR and _last_d!=ds and not rep_sent(ds):
         st=daily_stats(ds)
@@ -3850,7 +3827,7 @@ def get_adaptive_score_min():
     final = base + session_adj + regime_adj
     log("INFO", clr("Score min adaptatif: {} (base:{} sess:{:+d} regime:{:+d})".format(
         final, base, session_adj, regime_adj), "d"))
-    return max(60, min(95, final))
+    return max(72, min(95, final))
 
 
 
@@ -4231,6 +4208,7 @@ STK_ROCKET = "CAACAgIAAxkBAAIBjGWbNfNMiEkgPZrxgWMVBH1ycfP7AAIbAQACB8OhCsYm5NOoMB
 
 def kb_admin_full():
     return {"inline_keyboard":[
+        [{"text":"🙏 Excuses membres","callback_data":"adm_promo_send_promo_excuse"}],
         [{"text":"👥 Membres","callback_data":"adm_membres_1"},{"text":"📊 Stats","callback_data":"adm_stats"}],
         [{"text":"💰 Paiements","callback_data":"adm_payments"},{"text":"📈 Rapports","callback_data":"adm_rapports"}],
         [{"text":"📡 Forcer scan","callback_data":"adm_scan"},{"text":"🔍 Debug scan","callback_data":"adm_debug"}],
@@ -4414,6 +4392,8 @@ def handle_resetcount(uid, target):
 
 # ── Messages Promo ───────────────────────────────────────────────
 PROMO_MSGS = [
+    {"id":"promo_excuse","label":"🙏 Excuses membres (messages)",
+     "text":"🙏 <b>Un mot de l\'équipe AlphaBot</b>\n\nCher(e) membre,\n\nNous tenons à nous excuser sincèrement pour le <b>volume important de messages</b> que vous avez reçu ces derniers jours.\n\nNous avons ajusté notre système pour vous envoyer <b>uniquement les signaux essentiels</b> — plus de bruit, plus de clarté.\n\n📡 Désormais vous recevrez :\n✅ Les signaux de trading directement\n✅ Les rapports journaliers/hebdomadaires\n✅ Les résultats TP/SL en temps réel\n\nMerci pour votre confiance et votre patience. 🙏\n\n<i>— @leaderOdg · Équipe AlphaBot PRO</i>"},
     {"id":"promo_1","label":"📡 Accroche générale",
      "text":"📡 <b>SIGNAUX TRADING EN TEMPS RÉEL</b>\n\nTu rates des trades faute d\'entrée précise ?\n\n🎯 Entrée + Stop Loss + Take Profit automatiques\n🤖 IA qui analyse 24h/24  ·  ⚡ Mode Improvisation\n\n📩 Rejoins AlphaBot maintenant\n➡️ @leaderodg_bot"},
     {"id":"promo_2","label":"💰 Preuve sociale",
@@ -4497,6 +4477,275 @@ def handle_bcast_msg(uid, text):
 
 
 _test_mode_full = ""  # admin test mode FREE/PRO
+
+
+# ══════════════════════════════════════════════════════
+#  📊 MOTEUR BACKTEST — Rejoue les scans sur historique
+# ══════════════════════════════════════════════════════
+# Principe :
+#   1. Charger N bougies H (ex: 200 bougies 1h = ~8 jours)
+#   2. Glisser une fenêtre de lecture : bougies[0..i] → signal ?
+#   3. Pour chaque signal trouvé → simuler TP/SL sur les bougies suivantes
+#   4. Compter vrais TP, vrais SL, expirations
+#   5. Envoyer le rapport résumé à l'admin
+
+def backtest_market(m, nb_candles=150, tf="1h", score_min=72):
+    """
+    Rejoue le scan ICT + liquidité sur les nb_candles dernières bougies.
+    Retourne liste de trades simulés avec résultat réel.
+    """
+    # Charger l'historique complet
+    raw = fetch_c(m["sym"], tf, "60d")
+    if not raw or len(raw) < nb_candles + 20:
+        return []
+
+    candles = raw[-(nb_candles + 20):]   # un peu de marge pour l'analyse
+    results  = []
+    in_trade = False   # une seule position à la fois par paire
+
+    # Fenêtre glissante : on analyse à chaque bougie passée
+    for i in range(40, len(candles) - 5):
+        if in_trade:
+            continue   # déjà en position → on attend le résultat
+
+        window = candles[:i]   # historique visible jusqu'à la bougie i
+        future = candles[i:]   # bougies "futures" pour simuler TP/SL
+
+        # ── Analyser la fenêtre ─────────────────────────────────────
+        try:
+            b, _, bt = detect_bias(window[-50:] if len(window) >= 50 else window)
+            if b == "NEUTRAL":
+                continue
+
+            liq = agent_liquidity(window, b)
+            if not liq:
+                continue   # liquidité obligatoire
+
+            bbs = breakers(window, b)
+            if not bbs:
+                continue
+
+            sc  = conf_score(window, b)
+            fvg_z = fvg(window, b)
+            _, cc2 = choch_seq(window[-50:] if len(window) >= 50 else window)
+            sh_h  = max(x["h"] for x in window[-50:])
+            sl_h  = min(x["l"] for x in window[-50:])
+            ote_lo, ote_hi = ote_zone(sh_h, sl_h, b)
+            lp    = window[-1]["c"]
+            in_ote = bool(ote_lo and ote_hi and ote_lo <= lp <= ote_hi)
+
+            if in_ote:  sc = min(sc + 12, 115)
+            if fvg_z:   sc = min(sc + 15, 115)
+            if cc2 >= 2: sc = min(sc + 10, 115)
+            sc = min(sc + liq["score"], 115)
+
+            if sc < score_min:
+                continue
+
+            # ── Calculer entrée / TP / SL ──────────────────────────
+            bb   = bbs[0]
+            a    = atr(window)
+            sp_p = m["pip"] * 1.5   # spread estimé
+            eq_h, eq_l = eqh_eql(window)
+
+            if b == "BULLISH":
+                sl   = bb["bottom"] - a * 0.15 - sp_p
+                risk = lp - sl
+                if risk <= 0 or risk > a * 10:
+                    continue
+                tp = (eq_h * 0.9995) if (eq_h and lp < eq_h < lp + risk * 5) else lp + risk * 2.5
+                if (tp - lp) / risk < 2.0:
+                    continue
+                side = "BUY"
+            else:
+                sl   = bb["top"] + a * 0.15 + sp_p
+                risk = sl - lp
+                if risk <= 0 or risk > a * 10:
+                    continue
+                tp = (eq_l * 1.0005) if (eq_l and lp - risk * 5 < eq_l < lp) else lp - risk * 2.5
+                if (lp - tp) / risk < 2.0:
+                    continue
+                side = "SELL"
+
+            rr = round(abs(tp - lp) / risk, 1)
+
+        except Exception:
+            continue
+
+        # ── Simuler TP/SL sur les bougies futures ──────────────────
+        result = "OPEN"; exit_price = None; candles_held = 0
+        for fi, fc in enumerate(future[1:30]):   # max 30 bougies pour expirer
+            candles_held = fi + 1
+            if side == "BUY":
+                if fc["h"] >= tp:
+                    result = "TP"; exit_price = tp; break
+                if fc["l"] <= sl:
+                    result = "SL"; exit_price = sl; break
+            else:
+                if fc["l"] <= tp:
+                    result = "TP"; exit_price = tp; break
+                if fc["h"] >= sl:
+                    result = "SL"; exit_price = sl; break
+
+        if result == "OPEN":
+            result = "EXPIRED"; exit_price = future[min(29, len(future)-1)]["c"]
+
+        dp    = 2 if lp > 1000 else (3 if lp > 10 else 5)
+        f_rnd = lambda v: round(v, dp)
+        gain_pips = abs(tp - lp)  / m["pip"]
+        loss_pips = abs(sl - lp)  / m["pip"]
+
+        results.append({
+            "pair"    : m["name"],
+            "side"    : side,
+            "entry"   : f_rnd(lp),
+            "tp"      : f_rnd(tp),
+            "sl"      : f_rnd(sl),
+            "rr"      : rr,
+            "score"   : sc,
+            "result"  : result,
+            "exit"    : f_rnd(exit_price) if exit_price else None,
+            "held"    : candles_held,
+            "g001"    : round(gain_pips * 0.01, 2),
+            "l001"    : round(loss_pips * 0.01, 2),
+            "g1"      : round(gain_pips, 2),
+            "l1"      : round(loss_pips, 2),
+            "liq_lbl" : liq.get("label","?"),
+            "bias"    : b,
+            "tf"      : tf,
+            "candle_i": i,
+        })
+        in_trade = True   # une position à la fois
+        # Avancer après la clôture du trade
+        if result != "EXPIRED":
+            i += candles_held   # sauter les bougies déjà utilisées
+
+    return results
+
+
+def run_backtest(uid, nb_candles=150, tf="1h", score_min=72):
+    """
+    Lance le backtest sur tous les marchés actifs et envoie le rapport.
+    Appelé en thread depuis /backtest admin.
+    """
+    tg_send(uid,
+        "⏳ <b>BACKTEST EN COURS...</b>\n\n"
+        "📊 Paramètres :\n"
+        f"  · Timeframe : <b>{tf}</b>\n"
+        f"  · Bougies   : <b>{nb_candles}</b>\n"
+        f"  · Score min : <b>{score_min}</b>\n\n"
+        "Analyse de {} marchés...".format(len(MARKETS)))
+
+    all_trades = []
+    for m in MARKETS:
+        try:
+            trades = backtest_market(m, nb_candles=nb_candles,
+                                     tf=tf, score_min=score_min)
+            all_trades.extend(trades)
+        except Exception as e:
+            log("WARN", f"backtest {m['name']}: {e}")
+
+    if not all_trades:
+        tg_send(uid,
+            "🔍 <b>BACKTEST — Aucun signal détecté</b>\n\n"
+            "Essaie avec un score min plus bas : /backtest 72\n"
+            "Ou un TF différent : /backtest 72 30m")
+        return
+
+    # ── Calculer les stats globales ─────────────────────────────────
+    tp_list  = [t for t in all_trades if t["result"] == "TP"]
+    sl_list  = [t for t in all_trades if t["result"] == "SL"]
+    exp_list = [t for t in all_trades if t["result"] == "EXPIRED"]
+    total    = len(all_trades)
+    wins     = len(tp_list)
+    losses   = len(sl_list)
+    wr       = round(wins / total * 100) if total > 0 else 0
+    net_r    = round(wins * 2.5 - losses * 1.0, 2)  # RR moyen 2.5
+    g1_total = round(sum(t["g1"] for t in tp_list)
+                   - sum(t["l1"] for t in sl_list), 2)
+    avg_rr   = round(sum(t["rr"] for t in all_trades) / total, 1) if total else 0
+
+    sep = "═" * 24
+    perf = "🔥🔥" if wr >= 70 else ("🔥" if wr >= 55 else ("📊" if wr >= 45 else "⚠️"))
+
+    lines = [
+        f"📊 <b>RAPPORT BACKTEST</b> {perf}",
+        sep,
+        f"⏱ TF : <b>{tf}</b>  ·  Bougies : <b>{nb_candles}</b>  ·  Score min : <b>{score_min}</b>",
+        "",
+        f"📡 Signaux détectés : <b>{total}</b>",
+        f"✅ TP : <b>{wins}</b>  ({wr}% Win Rate)",
+        f"❌ SL : <b>{losses}</b>",
+        f"⏳ Expirés (30 bougies) : <b>{len(exp_list)}</b>",
+        "",
+        f"📐 RR moyen : <b>1:{avg_rr}</b>",
+        f"💰 Résultat net lot 1.00 : <b>{'+'if g1_total>=0 else ''}{g1_total}$</b>",
+        f"📈 R total : <b>{'+'if net_r>=0 else ''}{net_r}R</b>",
+        sep,
+        "",
+        "📋 <b>DÉTAIL PAR PAIRE</b>",
+        "",
+    ]
+
+    # ── Grouper par paire ───────────────────────────────────────────
+    pairs_seen = {}
+    for t in all_trades:
+        p = t["pair"]
+        pairs_seen.setdefault(p, {"tp":0,"sl":0,"exp":0,"g1":0})
+        if t["result"] == "TP":
+            pairs_seen[p]["tp"] += 1
+            pairs_seen[p]["g1"] += t["g1"]
+        elif t["result"] == "SL":
+            pairs_seen[p]["sl"] += 1
+            pairs_seen[p]["g1"] -= t["l1"]
+        else:
+            pairs_seen[p]["exp"] += 1
+
+    for pair, st in sorted(pairs_seen.items(),
+                           key=lambda x: -(x[1]["tp"])):
+        tot_p = st["tp"] + st["sl"] + st["exp"]
+        wr_p  = round(st["tp"] / tot_p * 100) if tot_p else 0
+        g     = round(st["g1"], 2)
+        lines.append(
+            f"  <b>{pair}</b> — {tot_p} sig  "
+            f"{st['tp']}✅ {st['sl']}❌  "
+            f"{wr_p}% WR  "
+            f"{'+'if g>=0 else ''}{g}$")
+
+    lines += [
+        "",
+        sep,
+        "📝 <b>10 DERNIERS TRADES</b>",
+        "",
+    ]
+
+    for t in all_trades[-10:]:
+        icon = "✅" if t["result"] == "TP" else ("❌" if t["result"] == "SL" else "⏳")
+        d    = "⬆️" if t["side"] == "BUY" else "⬇️"
+        g    = f"+{t['g1']}$" if t["result"] == "TP" else (
+               f"-{t['l1']}$" if t["result"] == "SL" else "exp.")
+        lines.append(
+            f"{icon} <b>{t['pair']}</b> {d}  "
+            f"E:<code>{t['entry']}</code> "
+            f"TP:<code>{t['tp']}</code> "
+            f"SL:<code>{t['sl']}</code>  "
+            f"RR 1:{t['rr']}  {g}  "
+            f"💧{t['liq_lbl']}")
+
+    lines += [
+        "",
+        sep,
+        "⚠️ Backtest = données historiques. Résultats passés ≠ futurs.",
+        "🤖 AlphaBot PRO  ·  @leaderodg_bot",
+    ]
+
+    msg = "\n".join(lines)
+    # Telegram limite à 4096 chars
+    if len(msg) > 4000:
+        msg = msg[:3900] + "\n\n...(tronqué — trop de signaux)"
+
+    tg_send(uid, msg, kb=kb_admin_back())
+    log("AI", clr(f"Backtest terminé — {total} trades, WR {wr}%", "g"))
 
 def dispatch(uid, uname, txt):
     """Dispatcher principal — gère boutons clavier ET commandes slash."""
@@ -4582,6 +4831,19 @@ def dispatch(uid, uname, txt):
         if cmd == "scan":
             tg_send(uid, "📡 Scan lancé...")
             threading.Thread(target=scan_and_send, daemon=True).start(); return
+        if cmd in ("backtest", "bt"):
+            # Usage : /backtest [score_min] [tf] [nb_candles]
+            # Ex: /backtest 72 1h 150  ou  /backtest 80 30m 200
+            bt_args  = arg.split() if arg else []
+            bt_score = int(bt_args[0]) if len(bt_args) > 0 and bt_args[0].isdigit() else 72
+            bt_tf    = bt_args[1] if len(bt_args) > 1 else "1h"
+            bt_nb    = int(bt_args[2]) if len(bt_args) > 2 and bt_args[2].isdigit() else 150
+            # Valider le TF
+            if bt_tf not in ("5m","15m","30m","1h","4h"):
+                bt_tf = "1h"
+            threading.Thread(target=run_backtest,
+                             args=(uid, bt_nb, bt_tf, bt_score),
+                             daemon=True).start(); return
         if cmd == "annuler":
             _bcast_pending.pop(uid, None)
             tg_send(uid, "❌ Broadcast annulé.", kb=kb_reply()); return
