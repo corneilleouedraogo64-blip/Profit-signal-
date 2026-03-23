@@ -1781,7 +1781,7 @@ def send_rapports(uid):
 
 def send_admin_full(uid):
     if uid!=ADMIN_ID: tg_send(uid,"❌ Accès refusé."); return
-    total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session()
+    total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session(); sm=get_adaptive_score_min()
     st=daily_stats(); pend=pending_pays(); ch=chal_get(); reg=AI_REG
     tg_sticker(uid,STK_PRO)
     tg_send(uid,"🛡 <b>ADMIN — AlphaBot v10</b>\n"+"═"*22+"\n\n"
@@ -4026,17 +4026,20 @@ def send_pay_plan(uid, plan_key="PRO"):
              "PRO":{"price":10,"label":"PRO"},"VIP":{"price":25,"label":"VIP"}}
     plan = plans.get(plan_key, plans["PRO"])
     price = plan["price"]; label = plan["label"]
+    sep = "━"*22
     tg_send(uid,
-        "💰 <b>PAIEMENT {} — {}$ USDT/mois</b>\n"+"━"*22+"\n\n"
+        (
+        "💰 <b>PAIEMENT {lbl} — {pr}$ USDT/mois</b>\n{sep}\n\n"
         "⚠️ <b>RÉSEAU : TRC20 UNIQUEMENT</b>\n"
         "Pas BEP20, pas ERC20 — sinon perdu !\n\n"
         "👇 <b>Adresse USDT TRC20 :</b>\n"
-        "<code>{}</code>\n\n"+"━"*22+"\n"
+        "<code>{addr}</code>\n\n{sep}\n"
         "1️⃣ Ouvre Binance / Trust Wallet\n"
-        "2️⃣ Envoie <b>{}$ USDT TRC20</b>\n"
+        "2️⃣ Envoie <b>{pr}$ USDT TRC20</b>\n"
         "3️⃣ Clique <b>J\'ai payé ✅</b>\n"
         "4️⃣ Envoie ton <b>TX Hash</b>\n\n"
-        "🤖 <b>Activation automatique sous 2 min !</b>".format(label,price,USDT_ADDR,price),
+        "🤖 <b>Activation automatique sous 2 min !</b>"
+        ).format(lbl=label, pr=price, addr=USDT_ADDR, sep=sep),
         kb={"inline_keyboard":[
             [{"text":"✅ J\'ai payé — Soumettre TX Hash","callback_data":"pay_submitted_{}".format(plan_key)}],
             [{"text":"◀️ Voir les plans","callback_data":"pro"}],
@@ -4106,7 +4109,7 @@ def kb_admin_full():
 
 def send_admin_full(uid):
     if uid!=ADMIN_ID: tg_send(uid,"❌ Accès refusé."); return
-    total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session()
+    total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session(); sm=get_adaptive_score_min()
     st=daily_stats(); pend=pending_pays(); ch=chal_get(); reg=AI_REG
     tg_sticker(uid,STK_PRO)
     tg_send(uid,
@@ -4224,7 +4227,7 @@ def handle_monstatus_full(uid):
             ch["balance"],ch["am_cycle"],reg.get("regime","?"),uid))
 
 def handle_marches_full(uid):
-    sn,sm,sl_l,wknd=get_session()
+    sn,sm,sl_l,wknd=get_session(); sm=get_adaptive_score_min()
     tg_send(uid,"📡 <b>SCAN EN COURS...</b>\n🕐 {}  ·  Score min: <b>{}</b>\n⏳ Analyse {} marchés...".format(sl_l,sm,len(MARKETS)))
     active=[m for m in MARKETS if not wknd or m.get("crypto",False)]
     news_ok,news_lbl=news_check(); q=Queue(); threads=[]
@@ -5193,6 +5196,7 @@ def main():
             else: log("ERR", clr("Webhook échoué: {}".format(r), "red"))
             # Message de démarrage admin
             sn, sm, sl_l, wknd = get_session()
+            sm_real = get_adaptive_score_min()
             ch = chal_get()
             tg_send(ADMIN_ID,
                 "🤖 <b>AlphaBot PRO v10 — EN LIGNE !</b>\n\n"
@@ -5204,7 +5208,7 @@ def main():
                 "🏆 Challenge : <b>{:.4f}$</b>\n\n"
                 "📡 FREE {}/j  ·  PRO {}/j\n"
                 "🛠 /admin pour le panel".format(
-                    port, sl_l, sm,
+                    port, sl_l, sm_real,
                     AI_REG.get("regime", "Init"),
                     ch["balance"], FREE_LIMIT, PRO_LIMIT),
                 kb=kb_reply())
