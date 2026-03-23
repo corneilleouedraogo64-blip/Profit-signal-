@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-AlphaBot PRO v9 — Agent IA Adaptatif
+AlphaBot PRO v10 — Agent IA Adaptatif
 • Bot Telegram FREE/PRO/VIP + paiement USDT auto
 • 20 marchés Forex/Métaux/Crypto/Indices/Pétrole
 • Cerveau ICT/SMC v2 + Mode IMPROVISATION
@@ -27,12 +27,12 @@ VIP_CH       = os.getenv("TG_VIP",   "-1003771736496")
 ADMIN_ID     = int(os.getenv("ADMIN_ID", "6982051442"))
 USDT_ADDR    = "TJuPBihvzgb6ffGLw4WnqC33Av38kwU7XE"
 BROKER_LINK  = "https://one.exnessonelink.com/a/nb3fx0bpnm"
-DB_FILE      = "ab9.db"
+DB_FILE      = "ab10.db"
 BINANCE_BASE = "https://fapi.binance.com/fapi/v1"
 
 PRO_PRICE  = 10;  REF_TARGET = 30;  REF_MONTHS = 3
 FREE_LIMIT = 2;   PRO_LIMIT  = 10;  NB_AGENTS  = 20
-TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 20
+TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 30
 DAILY_HOUR = 20;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
 FEE_TAKER  = 0.0004
 CHALLENGE_START = float(os.getenv("CHALLENGE_START", "5.0"))
@@ -76,8 +76,8 @@ VIP_CHANNEL      = VIP_CH       # alias v13
 # ══════════════════════════════════════════════════════
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S", handlers=[logging.StreamHandler(),
-    logging.FileHandler("ab9.log", encoding="utf-8")])
-L = logging.getLogger("AB9")
+    logging.FileHandler("ab10.log", encoding="utf-8")])
+L = logging.getLogger("AB10")
 C = {"r":"\033[0m","b":"\033[1m","d":"\033[2m","c":"\033[96m","g":"\033[92m","y":"\033[93m","red":"\033[91m","m":"\033[95m"}
 def clr(t,*c): return "".join(C[x] for x in c)+str(t)+C["r"]
 def log(lv,msg):
@@ -132,7 +132,7 @@ def tg_send(cid, text, kb=None):
     with _tg_lock: return tg_req("sendMessage", p)
 
 def tg_doc(cid, data, fname, caption=""):
-    bd = "AB9B"
+    bd = "AB10B"
     body = b""
     def f(n,v): return ("--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n".format(bd,n)).encode()+str(v).encode()+b"\r\n"
     body += f("chat_id",cid)
@@ -210,7 +210,7 @@ def db_init():
     cur.execute("INSERT OR IGNORE INTO challenge(id,balance,start_bal,peak,day_open) VALUES(1,?,?,?,?)",
         (CHALLENGE_START,)*4)
     con.commit(); con.close()
-    log("INFO", clr("DB v9 OK","b","g"))
+    log("INFO", clr("DB v10 OK","b","g"))
 
 # ── Helpers DB ─────────────────────────────────────────
 def db_one(sql, args=()):
@@ -596,7 +596,7 @@ def ote_zone(sh,sl,bias):
     return sl+rng*0.618,sl+rng*0.786
 
 # ══════════════════════════════════════════════════════
-#  🧠 MODE IMPROVISATION — Le cœur du v9
+#  🧠 MODE IMPROVISATION — Le cœur du v10
 # ══════════════════════════════════════════════════════
 # Quand il n'y a pas de setup ICT parfait, l'agent improvise :
 # il allège les critères si 3 conditions fondamentales sont réunies :
@@ -1654,7 +1654,7 @@ def _scan_inner():
     threading.Thread(target=check_open_sigs,daemon=True).start()
     threading.Thread(target=ai_scan_cycle,daemon=True).start()
     # Vérifier fin de session → rapport automatique
-    check_session_end_report()
+    # Session end reports désactivés — rapport soir uniquement
 
 def ai_scan_cycle():
     try:
@@ -1667,10 +1667,10 @@ def ai_scan_cycle():
 
 def do_backup():
     try:
-        import shutil; bp="/tmp/ab9_{}.db".format(datetime.now().strftime("%Y%m%d_%H%M"))
+        import shutil; bp="/tmp/ab10_{}.db".format(datetime.now().strftime("%Y%m%d_%H%M"))
         shutil.copy2(DB_FILE,bp)
         with open(bp,"rb") as f: data=f.read()
-        tg_doc(ADMIN_ID,data,"ab9_backup_{}.db".format(datetime.now().strftime("%Y%m%d")),"💾 <b>Backup v9</b> — {}".format(datetime.now().strftime("%d/%m/%Y %H:%M")))
+        tg_doc(ADMIN_ID,data,"ab10_backup_{}.db".format(datetime.now().strftime("%Y%m%d")),"💾 <b>Backup v10</b> — {}".format(datetime.now().strftime("%d/%m/%Y %H:%M")))
     except Exception as e: log("WARN","Backup: {}".format(e))
 
 def relance_inactifs():
@@ -1801,7 +1801,7 @@ def send_welcome(uid,uname):
     db_register(uid,uname,tg_fn=tg_send)
     p=is_pro(uid); ch=chal_get()
     tg_sticker(uid,STK_W)
-    tg_send(uid,"🤖 <b>AlphaBot PRO v9 — Agent IA Adaptatif</b>\n"+"═"*22+"\n\n"
+    tg_send(uid,"🤖 <b>AlphaBot PRO v10 — Agent IA Adaptatif</b>\n"+"═"*22+"\n\n"
         "📡 20 marchés : Forex · Or · BTC · Indices · Pétrole\n"
         "🧠 ICT/SMC v2 + <b>Mode Improvisation</b> ⚡\n"
         "🌍 Régime: <b>{}</b>  ·  Challenge: <b>{:.4f}$</b>\n\n"
@@ -1826,7 +1826,7 @@ def send_challenge(uid):
     w=ch.get("today_w",0); l=ch.get("today_l",0); tot=w+l
     wr=round(w/tot*100) if tot>0 else 0
     open_t=sum(1 for t in AI_OT.values() if t["status"]=="open")
-    tg_send(uid,"🏆 <b>CHALLENGE IA — Agent Alpha v9</b>\n"+"═"*22+"\n\n"
+    tg_send(uid,"🏆 <b>CHALLENGE IA — Agent Alpha v10</b>\n"+"═"*22+"\n\n"
         "{}\n\n"
         "📊 Aujourd'hui: W:{} L:{} WR:{}%\n"
         "📈 PnL jour: {:+.4f}$\n"
@@ -1862,7 +1862,7 @@ def send_admin_full(uid):
     total,pro,sigs,pays,g1d=global_stats(); sn,sm,sl_l,_=get_session()
     st=daily_stats(); pend=pending_pays(); ch=chal_get(); reg=AI_REG
     tg_sticker(uid,STK_PRO)
-    tg_send(uid,"🛡 <b>ADMIN — AlphaBot v9</b>\n"+"═"*22+"\n\n"
+    tg_send(uid,"🛡 <b>ADMIN — AlphaBot v10</b>\n"+"═"*22+"\n\n"
         "👥 Membres: <b>{}</b>  ·  PRO: <b>{}</b>  ·  FREE: <b>{}</b>\n"
         "📡 Signaux: <b>{}</b>  ·  Gains: <b>+${}</b>  ·  Payés: <b>{}</b>\n"
         "⏳ En attente: <b>{}</b>{}\n\n"
@@ -1881,7 +1881,7 @@ def send_admin_full(uid):
         ]})
 
 def send_guide(uid):
-    tg_send(uid,"📖 <b>GUIDE AlphaBot PRO v9</b>\n"+"═"*22+"\n\n"
+    tg_send(uid,"📖 <b>GUIDE AlphaBot PRO v10</b>\n"+"═"*22+"\n\n"
         "🧠 <b>Méthode ICT/SMC :</b>\n"
         "1️⃣ H1 Bias (BOS/CHoCH) → tendance\n"
         "2️⃣ M5 Breaker Block → zone d'entrée\n"
@@ -2438,15 +2438,9 @@ def _scan_and_send_inner():
                 db_count_increment(fuid)
                 time.sleep(0.04)
 
-    if sigs_raw:
-        report = _fmt_scan_report(results, news_lbl, scan_time, sl, sm, len(sigs_raw))
-        tg_send(CHANNEL_ID, report)
-        tg_send(ADMIN_ID, report)
-        for puid in pro_users_eff:
-            if puid != ADMIN_ID:
-                tg_send(puid, report); time.sleep(0.04)
-    else:
+    if not sigs_raw:
         log("INFO", clr("Aucun setup valide ce cycle.", "dim"))
+    # Scan summary supprimé — admin peut voir via /scan
 
     if int(hour_str) >= DAILY_HOUR and _last_daily != date_str and not db_report_sent(date_str):
         stats = db_daily_stats(date_str)
@@ -3840,7 +3834,7 @@ def send_admin_panel(uid):
     free   = total - pro
     tg_send_sticker(uid, STK_CROWN)
     tg_send(uid,
-        "🛡 <b>PANEL ADMIN — AlphaBot v8.5</b>\n" + "═" * 22 + "\n\n"
+        "🛡 <b>PANEL ADMIN — AlphaBot v10</b>\n" + "═" * 22 + "\n\n"
         "👥 Membres : <b>{}</b>  ·  PRO : <b>{}</b>  ·  FREE : <b>{}</b>\n"
         "📡 Signaux aujourd'hui : <b>{}</b>  ·  Gains : <b>+${}</b>\n"
         "💰 Paiements confirmés : <b>{}</b>\n"
@@ -4050,7 +4044,7 @@ def send_welcome(uid, uname, ref_by=0):
                  else "🔓 FREE → /pay")
     wknd_note = "\n🌍 <b>Week-end : crypto uniquement !</b>" if wknd else ""
     tg_send(uid,
-        "🤖 <b>AlphaBot PRO v9 — Bienvenue {} !</b>\n".format("@"+uname if uname else "Trader") +
+        "🤖 <b>AlphaBot PRO v10 — Bienvenue {} !</b>\n".format("@"+uname if uname else "Trader") +
         "═"*22 + "\n\n"
         "🆔 <b>ID :</b> <code>{}</code>\n"
         "📌 <b>Plan :</b> {}\n"
@@ -4225,7 +4219,7 @@ def send_admin_full(uid):
     improv_cnt=improv[0][0] if improv else 0
     tg_sticker(uid,STK_PRO)
     tg_send(uid,
-        "🛡 <b>PANEL ADMIN — AlphaBot v9</b>\n"+"═"*22+"\n\n"
+        "🛡 <b>PANEL ADMIN — AlphaBot v10</b>\n"+"═"*22+"\n\n"
         "👥 Membres: <b>{}</b>  ·  PRO: <b>{}</b>  ·  FREE: <b>{}</b>\n"
         "📡 Signaux: <b>{}</b>  ·  Gains: <b>+${}</b>\n"
         "⚡ Dont {} improvisation\n"
@@ -4253,7 +4247,7 @@ def send_admin_stats_full(uid):
     pend=pending_pays()
     wr_d=int(st["wins"]/st["n"]*100) if st["n"] else 0
     wr_w=int(ws["wins"]/ws["n"]*100) if ws["n"] else 0
-    msg=("📊 <b>STATS ALPHABOT PRO v9</b>\n"+"═"*22+"\n"
+    msg=("📊 <b>STATS ALPHABOT PRO v10</b>\n"+"═"*22+"\n"
          "👥 Total:{} PRO:{} FREE:{}\n"
          "🆕 Nouveaux 24h:{} · 7j:{}\n"
          "📡 Signaux:{} · Payés:{}\n\n"
@@ -5211,7 +5205,7 @@ def process_update(upd):
 # ══════════════════════════════════════════════════════
 def startup():
     print("\n"+clr("  ╔══════════════════════════════════════════════════╗","b","c"))
-    print(clr("  ║  AlphaBot PRO v9 — IA Adaptative · Improvisation  ║","b","c"))
+    print(clr("  ║  AlphaBot PRO v10 — IA Adaptative · Improvisation  ║","b","c"))
     print(clr("  ║  Forex·Métaux·Crypto·Indices · ICT/SMC · ⚡Mode   ║","b","c"))
     print(clr("  ╚══════════════════════════════════════════════════╝","b","c")+"\n")
     db_init()
@@ -5224,7 +5218,7 @@ def startup():
     def _notify():
         try:
             tg_send(ADMIN_ID,
-                "🤖 <b>AlphaBot PRO v9 — DÉMARRÉ !</b>\n\n"
+                "🤖 <b>AlphaBot PRO v10 — DÉMARRÉ !</b>\n\n"
                 "⚡ Mode Improvisation actif\n"
                 "🕐 {}  🎯 Score min : <b>{}</b>\n"
                 "{}\n"
@@ -5242,7 +5236,7 @@ def startup():
         except Exception as e:
             log("WARN", "notify startup: {}".format(e))
     threading.Thread(target=_notify, daemon=True).start()
-    log("INFO", clr("AlphaBot v9 actif", "b", "g")); return True
+    log("INFO", clr("AlphaBot v10 actif", "b", "g")); return True
 
 def make_wh():
     class WH(BaseHTTPRequestHandler):
@@ -5272,7 +5266,7 @@ def make_wh():
             else:
                 self.send_response(200); self.end_headers()
                 self.wfile.write(
-                    "AlphaBot v9 OK | {:.4f}$ | {} | cycles: {}".format(
+                    "AlphaBot v10 OK | {:.4f}$ | {} | cycles: {}".format(
                         ch["balance"], reg.get("regime","?"), _cycles_no_signal).encode())
         def log_message(self, *a): pass
     return WH
@@ -5311,7 +5305,7 @@ def main():
             sn, sm, sl_l, wknd = get_session()
             ch = chal_get()
             tg_send(ADMIN_ID,
-                "🤖 <b>AlphaBot PRO v9 — EN LIGNE !</b>\n\n"
+                "🤖 <b>AlphaBot PRO v10 — EN LIGNE !</b>\n\n"
                 "✅ DB initialisée\n"
                 "✅ Port {} ouvert\n"
                 "✅ Webhook configuré\n\n"
