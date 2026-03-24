@@ -522,6 +522,7 @@ def get_pro_info(uid):
 
 def pro_users(): return [r[0] for r in db_all("SELECT user_id FROM users WHERE plan IN ('PRO','VIP')")]
 def free_users(): return [r[0] for r in db_all("SELECT user_id FROM users WHERE plan='FREE'")]
+def all_users(): return [r[0] for r in db_all("SELECT user_id FROM users")]
 
 def find_user(uname):
     uname=uname.lstrip("@").lower()
@@ -1997,17 +1998,8 @@ def fmt_free(s, news, sl_label):
         f"💵 Lot 0.01 : <b>+${s['g001']}</b>  /  💰 Lot 1.00 : <b>+${s['g1']}</b>",
         "",
         sep,
-        "🚨 <b>Tu vois ce signal FREE ?</b>",
-        f"Les membres PRO en reçoivent <b>jusqu'à 20/jour</b> comme ça.",
-        f"Toi tu en as droit à seulement <b>{FREE_LIMIT}</b>. 😬",
-        "",
-        "⏳ Pendant que tu attends ton prochain signal,",
-        "<b>les PRO exécutent déjà les suivants.</b>",
-        "",
-        f"💎 <b>Passe PRO — seulement {PRO_PRICE}$ USDT</b>",
-        "👉 @leaderodg_bot  →  /pay",
-        sep,
-        "🤖 AlphaBot PRO  ·  @leaderodg_bot",
+        "⚠️ Analyse technique uniquement — pas un conseil financier",
+        "🤖 <b>AlphaBot PRO v11</b>  ·  @leaderodg_bot",
     ]
     return "\n".join(l for l in lines if l is not None)
 
@@ -2399,86 +2391,89 @@ def _scan_inner():
 
 
 
-    pru     = pro_users(); fru = free_users()
-    pru_eff = [u for u in pru if not (u == ADMIN_ID and _test_mode == "FREE")]
-    fru_eff = list(fru) + ([ADMIN_ID] if _test_mode == "FREE" and ADMIN_ID not in fru else [])
+    # Message promo FREE (Exness + activer PRO)
+    MSG_PROMO_FREE = (
+        "📊 <b>Tu as reçu tes {} signaux gratuits du jour !</b>\n\n"
+        "💡 Pour aller plus loin :\n\n"
+        "1️⃣ <b>Ouvre un compte Exness</b> (broker recommandé) :\n"
+        "👉 <a href=\"{}\">🔗 Créer mon compte Exness</a>\n\n"
+        "2️⃣ <b>Active le PRO gratuitement</b> :\n"
+        "Contacte @leaderOdg pour activation rapide\n\n"
+        "3️⃣ <b>Ou passe PRO directement :</b>\n"
+        "👉 /pay — seulement {}$ USDT/mois\n\n"
+        "🏆 PRO = signaux illimités + analyse complète"
+    ).format(FREE_LIMIT, BROKER_LINK, PRO_PRICE)
+
     for sig, key in sigs:
-        sc = sig.get("score", 0)
-        is_sniper = sc >= 90  # Signal élite → PRO uniquement, teaser FREE
+        sc  = sig.get("score", 0)
+        stk = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
         msg_p = fmt_pro(sig, news_lbl, sl_l)
         msg_f = fmt_free(sig, news_lbl, sl_l)
-        msg_blocked = fmt_blocked(sig)  # Message teaser pour FREE sur signal élite
 
-        # Sticker
-        stk = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
-
-        # ── Générer l'image du signal ────────────────────────────────
+        # ── Image du signal ──────────────────────────────────────────
         chart_img = None
         try:
-            m15_c = fetch_c(m_obj["sym"], "15m", "3d") if (m_obj := next((x for x in MARKETS if x["name"]==sig["name"]),None)) else None
+            m_obj = next((x for x in MARKETS if x["name"]==sig["name"]), None)
+            m15_c = fetch_c(m_obj["sym"], "15m", "3d") if m_obj else None
             chart_img = generate_signal_chart(sig, m15_c)
         except: pass
 
-        # ── Alerte sniper AVANT le signal (FOMO propre) ────────────
-        if is_sniper:
-            sniper_alert = (
-                "🚨 <b>SNIPER SETUP DETECTE — {}</b>\n\n"
-                "Score : <b>{}/100</b>  RR : <b>1:{}</b>\n"
-                "Conditions : quasi parfaites.\n\n"
-                "Ce type de setup est rare.\n"
-                "Il a ete envoye aux membres PRO.\n\n"
-                "💎 /pay — AlphaBot PRO v10"
-            ).format(sig["name"], sc, sig["rr"])
-            tg_send(CHANNEL_ID, sniper_alert)
-            for fuid in fru_eff: tg_send(fuid, sniper_alert); time.sleep(0.03)
-            time.sleep(0.5)
-
-        # ── Canal public ────────────────────────────────────────────
-        channel_msg = msg_blocked if is_sniper else msg_f
-        if chart_img and not is_sniper:
-            # Signal avec image pour FREE
-            r = tg_send_photo(CHANNEL_ID, chart_img, caption=channel_msg[:1024])
+        # ── MAX 2 MESSAGES : sticker + signal ────────────────────────
+        # Groupe PUBLIC (FREE) — message 1 : sticker, message 2 : signal
+        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
+        time.sleep(0.15)
+        if chart_img:
+            r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_f[:1024])
         else:
-            tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
-            time.sleep(0.2)
-            r = tg_send(CHANNEL_ID, channel_msg)
+            r = tg_send(CHANNEL_ID, msg_f)
+
+        # Groupe PRO (VIP) — message 1 : sticker, message 2 : signal complet
+        tg_req("sendSticker", {"chat_id": str(VIP_CH), "sticker": stk})
+        time.sleep(0.15)
+        if chart_img:
+            tg_send_photo(VIP_CH, chart_img, caption=msg_p[:1024])
+        else:
+            tg_send(VIP_CH, msg_p)
+
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
             save_signal(sig, sn)
-            log("SIG", "{} {} RR:1:{} Sc:{}{} G1:+${}".format(
-                clr(sig["name"], "b", "c"), sig["side"], sig["rr"],
-                sc, " SNIPER" if is_sniper else "", sig["g1"]))
+            log("SIG", "{} {} RR:1:{} Sc:{} G1:+${}".format(
+                clr(sig["name"], "b", "c"), sig["side"], sig["rr"], sc, sig["g1"]))
 
-        # ── PRO : signal complet + image ─────────────────────────────
-        for puid in pru_eff:
-            if count_today(puid) < PRO_LIMIT:
-                if chart_img:
-                    tg_send_photo(puid, chart_img, caption=msg_p[:1024])
-                else:
-                    tg_send(puid, msg_p)
-                count_incr(puid); time.sleep(0.05)
-
-        # ── FREE : signal normal si dispo, teaser si sniper ───────────
-        for fuid in fru_eff:
-            c = count_today(fuid)
-            if is_sniper:
-                # Signal sniper → teaser seulement, pas de compteur consommé
-                tg_send(fuid, msg_blocked); time.sleep(0.04)
-            elif c < FREE_LIMIT:
-                tg_send(fuid, msg_f); count_incr(fuid); time.sleep(0.04)
-            elif c == FREE_LIMIT:
-                tg_send(fuid, (
-                    "📊 <b>Signaux gratuits utilisés pour aujourd\'hui.</b>\n\n"
-                    "Soyons honnêtes :\n"
-                    "Si tu suis uniquement les signaux gratuits,\n"
-                    "tu vois les opportunités… sans pouvoir les exploiter pleinement.\n\n"
-                    "💎 <b>AlphaBot PRO</b> — {} signaux/jour, qualité maximale.\n"
-                    "La question est simple :\n"
-                    "observer, ou agir avec précision ?\n\n"
-                    "👉 @leaderodg_bot  →  /pay"
-                ).format(PRO_LIMIT))
-                count_incr(fuid)
+        # ── Notifications individuelles ──────────────────────────────
+        for uid in all_users():
+            try:
+                pro = is_pro(uid)
+                c   = count_today(uid)
+                if pro:
+                    # PRO → signal complet sans limite
+                    if chart_img:
+                        tg_send_photo(uid, chart_img, caption=msg_p[:1024])
+                    else:
+                        tg_send(uid, msg_p)
+                    count_incr(uid)
+                elif c < FREE_LIMIT:
+                    # FREE → signal simplifié dans la limite
+                    if chart_img:
+                        tg_send_photo(uid, chart_img, caption=msg_f[:1024])
+                    else:
+                        tg_send(uid, msg_f)
+                    count_incr(uid)
+                elif c == FREE_LIMIT:
+                    # FREE → limite atteinte → promo Exness + activer PRO
+                    tg_send(uid, MSG_PROMO_FREE,
+                            kb={"inline_keyboard":[
+                                [{"text":"🔗 Ouvrir Exness","url":BROKER_LINK}],
+                                [{"text":"💎 Activer PRO","callback_data":"pro"}],
+                                [{"text":"📩 Contacter admin","url":"https://t.me/leaderOdg"}]
+                            ]})
+                    count_incr(uid)
+                # Si c > FREE_LIMIT → silence, pas de spam
+                time.sleep(0.06)
+            except Exception as _e:
+                log("WARN", "Notif uid={}: {}".format(uid, _e))
 
     # ── Aucun signal : message "pas de setup" si heure active ──────
     sn2,_,_,wknd2=get_session()
@@ -2532,6 +2527,41 @@ def ai_scan_cycle():
             log("AI",clr("Setup {} {} Sc:{} RR:{}".format(best["sym"],"L" if best["side"]=="BUY" else "S",best["sc"],best["rr"]),"g"))
             ai_open(best)
     except Exception as e: log("WARN","[AI] {}".format(e))
+
+def broadcast_new_version():
+    """Envoie un message de mise à jour v15 à TOUS les utilisateurs."""
+    time.sleep(8)
+    users = all_users()
+    # Construire le lien d'invitation groupe public
+    pub_invite = "https://t.me/+{}".format(
+        CHANNEL_ID.lstrip("-100") if CHANNEL_ID.startswith("-100") else CHANNEL_ID.lstrip("-")
+    )
+    msg = (
+        "🚀 <b>AlphaBot PRO v15 — NOUVELLE VERSION !</b>\n"
+        "═"*22+"\n\n"
+        "✅ <b>Bug corrigé :</b> tu vas maintenant recevoir\n"
+        "<b>tous les signaux directement ici</b> !\n\n"
+        "📡 Forex · Or · BTC · Indices\n"
+        "📊 Analyse ICT/SMC + Score + RR\n"
+        "⚡ Entrée + TP + SL automatiques\n\n"
+        "━"*22+"\n"
+        "👇 <b>Clique pour activer :</b>"
+    )
+    kb = {"inline_keyboard": [
+        [{"text": "✅ Activer la nouvelle version", "callback_data": "start"}],
+        [{"text": "📢 Rejoindre le groupe public",  "url": pub_invite}],
+        [{"text": "💎 Devenir PRO — 10$/mois",      "callback_data": "pro"}],
+    ]}
+    count = 0
+    for uid in users:
+        try:
+            tg_send(uid, msg, kb=kb)
+            count += 1
+            time.sleep(0.15)
+        except Exception as e:
+            log("WARN", "broadcast_v15 uid={}: {}".format(uid, e))
+    log("INFO", clr("Broadcast v15 → {} membres".format(count), "b", "g"))
+    tg_send(ADMIN_ID, "📢 <b>Broadcast v15 OK</b>\n✅ {} membres notifiés".format(count))
 
 def do_backup():
     try:
@@ -5061,15 +5091,15 @@ def send_affilie(uid, uname):
     done=min(refs,REF_TARGET); pct=int(done/REF_TARGET*100)
     fill=int(done/REF_TARGET*12); bar="🟩"*fill+"⬛"*(12-fill)
     tg_send(uid,
-        "📋 <b>COPIE CE MESSAGE ET ENVOIE À TES AMIS :</b>\n\n"+"━"*22+"\n\n"
+        ("📋 <b>COPIE CE MESSAGE ET ENVOIE À TES AMIS :</b>\n\n"+"━"*22+"\n\n"
         "🤖 <b>AlphaBot PRO</b> — Signaux trading GRATUITS !\n\n"
         "📡 <b>Forex, Or, BTC, Indices...</b>\n"
         "🎯 Entrées directes avec SL & TP automatiques\n"
         "💰 Jusqu\'à <b>+$500+ par signal</b> (lot 1.00)\n"
-        "📊 Analyse ICT/SMC + <b></b>\n\n"
-        "✅ <b>Gratuit</b> — 2 signaux/jour\n"
+        "📊 Analyse ICT/SMC\n\n"
+        "✅ <b>Gratuit</b> — signaux/jour\n"
         "💠 <b>PRO seulement 10$</b> — 10 signaux/jour\n\n"
-        "👉 <b>Clique ici :</b>\n<code>{}</code>\n\n"+"━"*22,
+        "👉 <b>Clique ici :</b>\n<code>{}</code>\n\n"+"━"*22).format(link),
         kb={"inline_keyboard":[[{"text":"🤝 Voir mes filleuls","callback_data":"ref_stats"}]]})
     rew = ("🏆 {} mois PRO actif ! Re-parraine pour renouveler !".format(REF_MONTHS) if refs>=REF_TARGET
            else "🔥 Plus que {} de plus → {} mois PRO !".format(REF_TARGET-refs,REF_MONTHS) if refs>=20
@@ -5695,6 +5725,15 @@ def run_backtest(uid, nb_candles=150, tf="1h", score_min=72):
 def dispatch(uid, uname, txt):
     """Dispatcher principal — gère boutons clavier ET commandes slash."""
     t = txt.strip()
+    # ── /start géré EN PREMIER pour préserver ref_by ─────────────────
+    _p0 = t.split()
+    _c0 = _p0[0].lower().lstrip("/").split("@")[0] if _p0 else ""
+    if _c0 in ("start", "menu", "aide", "help"):
+        _a0 = " ".join(_p0[1:]) if len(_p0) > 1 else ""
+        ref = int(_a0) if _a0.isdigit() else 0
+        send_welcome(uid, uname, ref_by=ref)
+        db_run("UPDATE users SET last_seen=? WHERE user_id=?", (datetime.now().isoformat(), uid))
+        return
     db_register(uid, uname)
     db_run("UPDATE users SET last_seen=? WHERE user_id=?",
            (datetime.now().isoformat(), uid))
@@ -5739,15 +5778,10 @@ def dispatch(uid, uname, txt):
     cmd   = parts[0].lower().lstrip("/").split("@")[0] if parts else ""
     arg   = " ".join(parts[1:]) if len(parts) > 1 else ""
 
-    if cmd in ("start", "menu", "aide", "help"):
-        ref = int(arg) if arg.isdigit() else 0
-        db_register(uid, uname, ref, tg_fn=tg_send)
-        send_welcome(uid, uname); return
-
-    if cmd == "admin":
-        threading.Thread(target=send_admin_full, args=(uid,), daemon=True).start(); return
     if cmd in ("pay",):
         threading.Thread(target=send_pay_plan, args=(uid,), daemon=True).start(); return
+    if cmd == "admin":
+        threading.Thread(target=send_admin_full, args=(uid,), daemon=True).start(); return
     if cmd == "pro":
         threading.Thread(target=send_pro_page, args=(uid,), daemon=True).start(); return
     if cmd in ("ref", "parrainage"):
@@ -6553,6 +6587,8 @@ def main():
             })
             if r.get("ok"): log("INFO", clr("Webhook OK — Bot prêt!", "b", "g"))
             else: log("ERR", clr("Webhook échoué: {}".format(r), "red"))
+            # Broadcast nouvelle version à tous les membres
+            threading.Thread(target=broadcast_new_version, daemon=True).start()
             # Message de démarrage admin
             sn, sm, sl_l, wknd = get_session()
             sm_real = get_adaptive_score_min()
@@ -6613,6 +6649,8 @@ def main():
             if not batch: break
             offset=batch[-1]["update_id"]+1
         log("INFO", clr("Polling démarré (offset={})".format(offset), "g"))
+        # Broadcast nouvelle version
+        threading.Thread(target=broadcast_new_version, daemon=True).start()
         ls=la=lc=0
         while True:
             try:
