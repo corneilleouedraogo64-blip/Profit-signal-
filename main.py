@@ -62,6 +62,56 @@ MARKETS = [
 ]
 CAT_EMO = {"FOREX":"💱","METALS":"🥇","CRYPTO":"₿","INDICES":"📈","OIL":"🛢"}
 PAIR_MAX_LEV = {"BTCUSDT":125,"ETHUSDT":100,"SOLUSDT":50,"BNBUSDT":75,"XRPUSDT":50}
+# ══════════════════════════════════════════════════════
+#  STRATÉGIE MULTI-MARCHÉS : FILTRE JOUR + PRIORITÉ
+# ══════════════════════════════════════════════════════
+
+# Priorité par paire (bonus score)
+MARKET_PRIORITY = {
+    "GBPJPY": 10,   # ultra volatile → setup premium
+    "XAUUSD": 10,   # gold → ICT/SMC parfait
+    "NAS100":  9,   # nasdaq → sessions US
+    "SPX500":  8,
+    "US30":    8,
+    "BTCUSD":  9,   # crypto week-end
+    "EURUSD":  7,
+    "USDJPY":  7,
+    "GBPUSD":  6,
+    "EURJPY":  6,
+    "XAGUSD":  5,
+}
+
+# Forex autorisés en semaine
+FOREX_ACTIFS = {"EURUSD", "GBPUSD", "USDJPY", "GBPJPY", "EURJPY"}
+
+def allowed_market(m):
+    """
+    Filtre les marchés selon le jour de la semaine :
+    - Week-end (sam/dim)  → CRYPTO BTC uniquement
+    - Semaine             → FOREX sélectifs + METALS + INDICES
+    """
+    wd = datetime.now(timezone.utc).weekday()  # 0=lundi … 6=dimanche
+    if wd >= 5:
+        # Week-end : BTC scalp uniquement
+        return m["cat"] == "CRYPTO" and m["name"] == "BTCUSD"
+    # Semaine
+    if m["cat"] == "FOREX":
+        return m["name"] in FOREX_ACTIFS
+    if m["cat"] in ("METALS", "INDICES"):
+        return True
+    return False
+
+def get_trade_mode(m):
+    """
+    Retourne le mode de trading :
+    - SCALP  → BTC week-end (RR 1.5–2.5, M5/M15)
+    - NORMAL → tous les autres marchés (RR ≥ 3.0)
+    """
+    wd = datetime.now(timezone.utc).weekday()
+    if wd >= 5 and m["cat"] == "CRYPTO":
+        return "SCALP"
+    return "NORMAL"
+
 # ── Alias constantes v13 (rétrocompatibilité) ─────────────────────
 INACTIF_DAYS     = 3
 DATA_MAX_AGE_MIN = DATA_MAX_AGE
@@ -1155,191 +1205,303 @@ def agent_liquidity(candles, bias, lookback=40):
 
 def agent_analyze(m, score_min, news_ok, q):
     """
-    Analyse multi-timeframe : H1 (tendance) + M15 (OB/structure) + M1 (entrée précise)
-    RR minimum : 3.0 — seulement les meilleurs setups
-    Confirmations obligatoires : biais H1 + OB M15 + liquidité
-    Optionnels (bonus score) : OTE, FVG, CHoCH, M1 confirmation
+    Analyse multi-timeframe v11 :
+      H1  → tendance de fond (obligatoire)
+      M15 → Order Block + structure (obligatoire)
+      M5  → confirmation d'entrée précise (nouveau — fortement pondéré)
+      M1  → ultra-précision optionnelle (bonus léger)
+
+    RR minimum : 3.0 normal / 1.5 scalp week-end
+    Obligatoires : biais H1 + OB M15 + liquidité M15
+    M5 aligné → +bonus fort  |  M5 contraire → pénalité
     """
     try:
-        sn,_,_,_=get_session()
+        sn, _, _, _ = get_session()
+        mode   = get_trade_mode(m)
+        rr_min = 1.5 if mode == "SCALP" else 3.0
 
-        # ── H1 : tendance de fond obligatoire ────────
-        h1=fetch_c(m["sym"],"1h","30d") or fetch_c(m["sym"],"4h","60d")
-        if not h1 or len(h1)<10:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"H1 insuffisant"}); return
-        b,bos,bt=detect_bias(h1)
-        if b=="NEUTRAL":
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Neutre"}); return
+        # ── Filtre session FOREX ──────────────────────────────────
+        if m["cat"] == "FOREX" and sn not in ("LONDON_KZ", "OVERLAP", "NY", "LONDON"):
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "Session FOREX inactive ({})".format(sn), "improv": False})
+            return
 
-        # ── Confirmation tendance H1 (3 niveaux) ─────
-        # 1. CHoCH/BOS, 2. EMA trend, 3. Swing structure
-        cd2,cc2=choch_seq(h1)
-        h1_closes=[x["c"] for x in h1[-50:]]
-        h1_ema20=sum(h1_closes[-20:])/20 if len(h1_closes)>=20 else h1_closes[-1]
-        h1_ema50=sum(h1_closes[-50:])/50 if len(h1_closes)>=50 else h1_closes[-1]
-        trend_score=0
-        if cc2>=1: trend_score+=1   # CHoCH confirmé
-        if cc2>=2: trend_score+=1   # CHoCH fort
-        if b=="BULLISH" and h1_ema20>h1_ema50: trend_score+=1
-        if b=="BEARISH" and h1_ema20<h1_ema50: trend_score+=1
-        H_sw,L_sw=swings(h1,n=3)
-        if b=="BULLISH" and len(H_sw)>=2 and H_sw[-1][1]>H_sw[-2][1]: trend_score+=1
-        if b=="BEARISH" and len(L_sw)>=2 and L_sw[-1][1]<L_sw[-2][1]: trend_score+=1
-        # Tendance confirmée si au moins 1 critère (les autres sont bonus)
-        if trend_score==0:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Tendance H1 faible"}); return
+        # ── H1 : tendance de fond (obligatoire) ──────────────────
+        h1 = fetch_c(m["sym"], "1h", "30d") or fetch_c(m["sym"], "4h", "60d")
+        if not h1 or len(h1) < 10:
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "H1 insuffisant"}); return
+        b, bos, bt = detect_bias(h1)
+        if b == "NEUTRAL":
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "Neutre H1"}); return
+
+        # ── Confirmation tendance H1 ──────────────────────────────
+        cd2, cc2 = choch_seq(h1)
+        h1_closes = [x["c"] for x in h1[-50:]]
+        h1_ema20  = sum(h1_closes[-20:]) / 20 if len(h1_closes) >= 20 else h1_closes[-1]
+        h1_ema50  = sum(h1_closes[-50:]) / 50 if len(h1_closes) >= 50 else h1_closes[-1]
+        trend_score = 0
+        if cc2 >= 1: trend_score += 1
+        if cc2 >= 2: trend_score += 1
+        if b == "BULLISH" and h1_ema20 > h1_ema50: trend_score += 1
+        if b == "BEARISH" and h1_ema20 < h1_ema50: trend_score += 1
+        H_sw, L_sw = swings(h1, n=3)
+        if b == "BULLISH" and len(H_sw) >= 2 and H_sw[-1][1] > H_sw[-2][1]: trend_score += 1
+        if b == "BEARISH" and len(L_sw) >= 2 and L_sw[-1][1] < L_sw[-2][1]: trend_score += 1
+        if trend_score == 0:
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "Tendance H1 faible"}); return
 
         time.sleep(0.08)
 
-        # ── M15 : timeframe principal ─────────────────
-        m15=fetch_c(m["sym"],"15m","10d")
-        if not m15 or len(m15)<10:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"M15 indispo"}); return
+        # ── M15 : structure + OB (obligatoire) ───────────────────
+        m15 = fetch_c(m["sym"], "15m", "10d")
+        if not m15 or len(m15) < 10:
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "M15 indispo"}); return
 
-        # ── M1 : confirmation entrée (optionnel) ──────
-        m1=fetch_c(m["sym"],"1m","2d")  # optionnel, pas bloquant
+        # ── Spread ────────────────────────────────────────────────
+        last5 = [abs(x["h"] - x["l"]) for x in m15[-5:] if x["h"] != x["l"]]
+        sp    = round(min(last5) / m["pip"] * 0.03, 2) if last5 else 0
+        if sp > m["max_sp"] * 1.5:
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "Spread large"}); return
 
-        # ── Spread ────────────────────────────────────
-        last5=[abs(x["h"]-x["l"]) for x in m15[-5:] if x["h"]!=x["l"]]
-        sp=round(min(last5)/m["pip"]*0.03,2) if last5 else 0
-        if sp>m["max_sp"]*1.5:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"Spread large"}); return
+        lp       = m15[-1]["c"]
+        sh_h1    = max(x["h"] for x in h1[-50:])
+        sl_h1    = min(x["l"] for x in h1[-50:])
+        ote_lo, ote_hi = ote_zone(sh_h1, sl_h1, b)
+        in_ote   = bool(ote_lo and ote_hi and ote_lo <= lp <= ote_hi)
+        fvg_z    = fvg(m15, b)
+        bbs      = breakers(m15, b)
+        sc       = conf_score(m15, b)
 
-        # ── Analyse M15 ────────────────────────────────
-        lp=m15[-1]["c"]
-        sh_h1=max(x["h"] for x in h1[-50:]); sl_h1=min(x["l"] for x in h1[-50:])
-        ote_lo,ote_hi=ote_zone(sh_h1,sl_h1,b)
-        in_ote=bool(ote_lo and ote_hi and ote_lo<=lp<=ote_hi)
-        fvg_z=fvg(m15,b)
-        bbs=breakers(m15,b)  # Order Blocks M15 — obligatoire
-        sc=conf_score(m15,b)
+        # ── Bonus M15 optionnels ──────────────────────────────────
+        if in_ote:          sc = min(sc + 12, 115)
+        if fvg_z:           sc = min(sc + 15, 115)
+        if cc2 >= 2:        sc = min(sc + 10, 115)
+        if trend_score >= 3: sc = min(sc + 8,  115)
 
-        # ── Bonus score confirmations optionnelles ────
-        if in_ote:       sc=min(sc+12,115)  # OTE Fibonacci
-        if fvg_z:        sc=min(sc+15,115)  # Fair Value Gap
-        if cc2>=2:       sc=min(sc+10,115)  # CHoCH fort H1
-        if trend_score>=3: sc=min(sc+8,115) # 3+ confirmations tendance
-
-        # ── M1 bonus : confirmation sur petite TF ─────
-        if m1 and len(m1)>=5:
-            m1_bias,_,_=detect_bias(m1[-30:] if len(m1)>=30 else m1)
-            if m1_bias==b: sc=min(sc+10,115)  # M1 aligné avec H1
-
-        # ── PATTERNS M5 : bonus score ─────────────────
-        m5_pat = fetch_c(m["sym"], "5m", "3d")  # M5 pour patterns visuels
-        pat_bonus, pat_badges = pattern_score_m5(m5_pat, b) if m5_pat else (0, [])
-        if pat_bonus > 0:
-            sc = min(sc + pat_bonus, 115)
-
-        # ── FONDAMENTAL : alignement macro ────────────
+        # ── News filtre ───────────────────────────────────────────
         news_status, news_title, news_adj = news_filter()
         if news_status == "BLOCK":
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,
-                   "reason":"News BLOCK: {}".format((news_title or "?")[:25]),"improv":False}); return
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "News BLOCK: {}".format((news_title or "?")[:25]),
+                   "improv": False}); return
         if news_status == "CAUTION":
-            sc = max(0, sc + news_adj)  # -10 pts si news dans 2h
+            sc = max(0, sc + news_adj)
 
+        # ── Fondamental ───────────────────────────────────────────
         fund_adj, fund_badge = fundamental_score_adj(m["name"], b)
         if fund_adj != 0:
             sc = min(max(0, sc + fund_adj), 115)
 
-        # ── MÉMOIRE IA : ajustement selon historique ──
-        # On construit une clé provisoire pour consulter la mémoire
+        # ── M5 : TIMEFRAME D'ENTRÉE (nouveau v11) ─────────────────
+        # Charge M5 une seule fois — utilisé pour patterns ET entrée
+        m5_raw = fetch_c(m["sym"], "5m", "3d")
+        m5_conf = {
+            "ok": False, "bias_ok": False, "score": 0,
+            "badges": [], "liq": None, "fvg": None, "ob": None,
+            "choch": 0, "details": "M5 indispo"
+        }
+        if m5_raw and len(m5_raw) >= 15:
+            m5_sl    = m5_raw[-50:] if len(m5_raw) >= 50 else m5_raw
+            m5_bias, _, m5_bt = detect_bias(m5_sl)
+            m5_liq   = agent_liquidity(m5_sl[-20:], b) if len(m5_sl) >= 20 else None
+            m5_fvg   = fvg(m5_sl, b, look=20)
+            m5_obs   = breakers(m5_sl, b)
+            m5_cd, m5_cc = choch_seq(m5_sl)
+            m5_ema   = sum(x["c"] for x in m5_sl[-10:]) / 10 if len(m5_sl) >= 10 else lp
+
+            m5_bonus  = 0
+            m5_badges = []
+
+            # Biais M5 aligné avec H1 → fondation
+            if m5_bias == b:
+                m5_bonus += 10
+                m5_badges.append("M5-Trend✓")
+                m5_conf["bias_ok"] = True
+            # Liquidité M5 (stop hunt / sweep / EQH-EQL)
+            if m5_liq:
+                m5_bonus += 15
+                m5_badges.append("M5-{}".format(m5_liq["label"].replace(" ✓", "")))
+                m5_conf["liq"] = m5_liq
+            # FVG M5 actif
+            if m5_fvg:
+                m5_bonus += 10
+                m5_badges.append("M5-FVG✓")
+                m5_conf["fvg"] = m5_fvg
+            # Order Block M5
+            if m5_obs:
+                m5_bonus += 8
+                m5_badges.append("M5-OB✓")
+                m5_conf["ob"] = m5_obs[0]
+            # CHoCH M5 (confirmation de changement de structure)
+            if m5_cc >= 2 and m5_cd == b[:4].rstrip("ISH"):
+                m5_bonus += 7
+                m5_badges.append("M5-CHoCH✓")
+                m5_conf["choch"] = m5_cc
+
+            m5_conf["score"]   = m5_bonus
+            m5_conf["badges"]  = m5_badges
+            m5_conf["ok"]      = m5_bonus >= 10  # au moins 1 confirmation M5
+
+            detail_parts = []
+            if m5_conf["bias_ok"]: detail_parts.append("biais✓")
+            if m5_conf["liq"]:     detail_parts.append("liq✓")
+            if m5_conf["fvg"]:     detail_parts.append("fvg✓")
+            if m5_conf["ob"]:      detail_parts.append("ob✓")
+            m5_conf["details"] = " · ".join(detail_parts) if detail_parts else "pas de setup"
+
+            if m5_conf["ok"]:
+                sc = min(sc + m5_bonus, 115)     # fort bonus si M5 confirme
+            elif not m5_conf["bias_ok"]:
+                sc = max(0, sc - 12)              # M5 contraire → pénalité
+        else:
+            m5_raw = None  # pas de données M5
+
+        # ── Patterns M5 (visuels — bonus score) ──────────────────
+        pat_bonus, pat_badges = pattern_score_m5(m5_raw, b) if m5_raw else (0, [])
+        if pat_bonus > 0:
+            sc = min(sc + pat_bonus, 115)
+
+        # ── M1 bonus (ultra-précision optionnelle) ────────────────
+        m1 = fetch_c(m["sym"], "1m", "2d")
+        if m1 and len(m1) >= 5:
+            m1_bias, _, _ = detect_bias(m1[-30:] if len(m1) >= 30 else m1)
+            if m1_bias == b:
+                sc = min(sc + 8, 115)
+
+        # ── Mémoire IA ────────────────────────────────────────────
         _tmp_badges = []
         if in_ote:  _tmp_badges.append("OTE")
         if fvg_z:   _tmp_badges.append("FVG")
-        if cc2>=2:  _tmp_badges.append("CHoCH")
-        if liq:     _tmp_badges.append("LIQ")
-        _tmp_key = "{}|{}|{}".format(m["name"], get_session()[0], "+".join(_tmp_badges) or "BASE")
+        if cc2 >= 2: _tmp_badges.append("CHoCH")
+        _tmp_key = "{}|{}|{}".format(m["name"], sn, "+".join(_tmp_badges) or "BASE")
         sc, mem_badge = mem_adj_score(_tmp_key, sc)
 
-        # ── Liquidité : condition OBLIGATOIRE ─────────
-        liq=agent_liquidity(m15,b)
+        # ── Liquidité M15 (OBLIGATOIRE) ───────────────────────────
+        liq = agent_liquidity(m15, b)
         if not liq:
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":"No liquidity sweep"}); return
-        sc=min(sc+liq["score"],115)
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": "No liquidity sweep M15"}); return
+        sc = min(sc + liq["score"], 115)
 
-        a=atr(m15); a_pct=a/(lp+0.0001)
-        s_min=score_min+(m.get("vol",3)-3)*2
+        a     = atr(m15)
+        a_pct = a / (lp + 0.0001)
+        s_min = score_min + (m.get("vol", 3) - 3) * 2
 
-        sig=None
+        # ── Priorité paire ────────────────────────────────────────
+        prio = MARKET_PRIORITY.get(m["name"], 0)
+        if prio > 0:
+            sc = min(sc + prio, 115)
 
-        # ── SETUP : OB M15 obligatoire ────────────────
-        if bbs and sc>=s_min and (news_ok or sc>=s_min+5):
-            bb=bbs[0]; e=lp; buf=a*0.12; sp_p=sp*m["pip"]
-            eq_h,eq_l=eqh_eql(m15)
-            if b=="BULLISH":
-                sl=bb["bottom"]-buf-sp_p; risk=e-sl
-                if risk>0 and risk<=a*12:
-                    # TP : vise EQH si proche, sinon RR 3.0 minimum
-                    tp_eq=(eq_h*0.9995) if (eq_h and e<eq_h<e+risk*6) else None
-                    tp=tp_eq if tp_eq else e+risk*3.0
-                    gain_net=abs(tp-e)-sp_p
-                    rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=3.0:  # RR MINIMUM 3.0 (sniper)
-                        dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                        ptp=gain_net/pip; psl=(risk+sp_p)/pip
-                        badges=[liq["label"]]
-                        if in_ote: badges.append("OTE ✓")
-                        if fvg_z:  badges.append("FVG ✓")
-                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
-                        if pat_badges: badges.extend(pat_badges)
-                        if fund_badge: badges.append(fund_badge)
-                        if mem_badge:  badges.append(mem_badge)
-                        tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
-                        sig={"name":m["name"],"cat":m["cat"],"side":"BUY","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
-                             "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
-                             "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
-                             "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges)+"  📊 "+tf_tag,
-                             "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0,"setup_key":_tmp_key}
-            else:
-                sl=bb["top"]+buf+sp_p; risk=sl-e
-                if risk>0 and risk<=a*12:
-                    tp_eq=(eq_l*1.0005) if (eq_l and e-risk*6<eq_l<e) else None
-                    tp=tp_eq if tp_eq else e-risk*3.0
-                    gain_net=abs(tp-e)-sp_p
-                    rr=round(gain_net/(risk+sp_p),1) if (risk+sp_p)>0 else 0
-                    if rr>=3.0:  # RR MINIMUM 3.0 (sniper)
-                        dp=2 if e>1000 else (3 if e>10 else 5); f=lambda v:round(v,dp); pip=m["pip"]
-                        ptp=gain_net/pip; psl=(risk+sp_p)/pip
-                        badges=[liq["label"]]
-                        if in_ote: badges.append("OTE ✓")
-                        if fvg_z:  badges.append("FVG ✓")
-                        if cc2>=2: badges.append("CHoCHx{} ✓".format(cc2))
-                        if pat_badges: badges.extend(pat_badges)
-                        if fund_badge: badges.append(fund_badge)
-                        if mem_badge:  badges.append(mem_badge)
-                        tf_tag="M1+M15+H1" if (m1 and len(m1)>=5) else "M15+H1"
-                        sig={"name":m["name"],"cat":m["cat"],"side":"SELL","entry":f(e),"tp":f(tp),"sl":f(sl),"rr":rr,
-                             "score":sc,"score_min":s_min,"atr":f(a),"sp":sp,"bias":b,"btype":bt,
-                             "g001":round(ptp*0.01,2),"g01":round(ptp*0.1,2),"g1":round(ptp,2),
-                             "l001":round(psl*0.01,2),"l01":round(psl*0.1,2),"l1":round(psl,2),
-                             "badges":" · ".join(badges)+"  📊 "+tf_tag,
-                             "time":datetime.now(timezone.utc).strftime("%H:%M"),
-                             "liq":liq,"mode":"ICT_M15","risk_mult":1.0,"setup_key":_tmp_key}
+        sig = None
+
+        # ── Construction signal — OB M15 obligatoire ─────────────
+        if bbs and sc >= s_min and (news_ok or sc >= s_min + 5):
+            bb   = bbs[0]
+            e    = lp
+            buf  = a * 0.12
+            sp_p = sp * m["pip"]
+            eq_h, eq_l = eqh_eql(m15)
+
+            # Construire les badges finaux (ordre logique : HTF → LTF)
+            all_badges = [liq["label"]]
+            if in_ote:              all_badges.append("OTE ✓")
+            if fvg_z:               all_badges.append("FVG M15 ✓")
+            if cc2 >= 2:            all_badges.append("CHoCHx{} H1 ✓".format(cc2))
+            all_badges.extend(m5_conf["badges"])     # badges M5 inline
+            if pat_badges:          all_badges.extend(pat_badges)
+            if fund_badge:          all_badges.append(fund_badge)
+            if mem_badge:           all_badges.append(mem_badge)
+            if mode == "SCALP":     all_badges.append("⚡ SCALP")
+            if m1 and len(m1) >= 5: all_badges.append("M1✓")
+
+            # Tag timeframe selon confirmations disponibles
+            tf_parts = ["H1", "M15"]
+            if m5_conf["ok"]: tf_parts.insert(1, "M5")
+            if m1 and len(m1) >= 5: tf_parts.append("M1")
+            tf_tag = "+".join(tf_parts)
+
+            dp = 2 if e > 1000 else (3 if e > 10 else 5)
+            f  = lambda v: round(v, dp)
+            pip = m["pip"]
+
+            if b == "BULLISH":
+                sl_p = bb["bottom"] - buf - sp_p
+                risk = e - sl_p
+                if risk > 0 and risk <= a * 12:
+                    tp_eq = (eq_h * 0.9995) if (eq_h and e < eq_h < e + risk * 6) else None
+                    tp    = tp_eq if tp_eq else e + risk * 3.0
+                    gain_net = abs(tp - e) - sp_p
+                    rr   = round(gain_net / (risk + sp_p), 1) if (risk + sp_p) > 0 else 0
+                    if rr >= rr_min:
+                        ptp = gain_net / pip; psl = (risk + sp_p) / pip
+                        sig = {
+                            "name": m["name"], "cat": m["cat"], "side": "BUY",
+                            "entry": f(e), "tp": f(tp), "sl": f(sl_p), "rr": rr,
+                            "score": sc, "score_min": s_min, "atr": f(a), "sp": sp,
+                            "bias": b, "btype": bt,
+                            "g001": round(ptp * 0.01, 2), "g01": round(ptp * 0.1, 2),
+                            "g1": round(ptp, 2),
+                            "l001": round(psl * 0.01, 2), "l01": round(psl * 0.1, 2),
+                            "l1": round(psl, 2),
+                            "badges": " · ".join(all_badges) + "  📊 " + tf_tag,
+                            "time": datetime.now(timezone.utc).strftime("%H:%M"),
+                            "liq": liq, "mode": mode, "risk_mult": 1.0,
+                            "setup_key": _tmp_key,
+                            "m5_conf": m5_conf,   # données M5 complètes
+                            "tf_tag": tf_tag,
+                        }
+
+            else:  # BEARISH
+                sl_p = bb["top"] + buf + sp_p
+                risk = sl_p - e
+                if risk > 0 and risk <= a * 12:
+                    tp_eq = (eq_l * 1.0005) if (eq_l and e - risk * 6 < eq_l < e) else None
+                    tp    = tp_eq if tp_eq else e - risk * 3.0
+                    gain_net = abs(tp - e) - sp_p
+                    rr   = round(gain_net / (risk + sp_p), 1) if (risk + sp_p) > 0 else 0
+                    if rr >= rr_min:
+                        ptp = gain_net / pip; psl = (risk + sp_p) / pip
+                        sig = {
+                            "name": m["name"], "cat": m["cat"], "side": "SELL",
+                            "entry": f(e), "tp": f(tp), "sl": f(sl_p), "rr": rr,
+                            "score": sc, "score_min": s_min, "atr": f(a), "sp": sp,
+                            "bias": b, "btype": bt,
+                            "g001": round(ptp * 0.01, 2), "g01": round(ptp * 0.1, 2),
+                            "g1": round(ptp, 2),
+                            "l001": round(psl * 0.01, 2), "l01": round(psl * 0.1, 2),
+                            "l1": round(psl, 2),
+                            "badges": " · ".join(all_badges) + "  📊 " + tf_tag,
+                            "time": datetime.now(timezone.utc).strftime("%H:%M"),
+                            "liq": liq, "mode": mode, "risk_mult": 1.0,
+                            "setup_key": _tmp_key,
+                            "m5_conf": m5_conf,
+                            "tf_tag": tf_tag,
+                        }
 
         if sig:
-            q.put({"name":m["name"],"cat":m["cat"],"found":True,"signal":sig,"improv":False})
+            q.put({"name": m["name"], "cat": m["cat"], "found": True,
+                   "signal": sig, "improv": False})
         else:
-            reason="RR<3.0" if bbs and sc>=s_min else "Score {}/{}".format(sc,s_min) if not bbs else "No OB M15"
-            q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":reason,"improv":False})
-    except Exception as ex:
-        q.put({"name":m["name"],"cat":m["cat"],"found":False,"reason":str(ex)[:40],"improv":False})
+            if bbs and sc >= s_min:
+                reason = "RR<{:.1f}".format(rr_min)
+            elif not bbs:
+                reason = "No OB M15"
+            elif not m5_conf["ok"]:
+                reason = "M5 non aligné ({})".format(m5_conf["details"])
+            else:
+                reason = "Score {}/{}".format(sc, s_min)
+            q.put({"name": m["name"], "cat": m["cat"], "found": False,
+                   "reason": reason, "improv": False,
+                   "sc": sc, "s_min": s_min, "m5_ok": m5_conf["ok"]})
 
-# ══════════════════════════════════════════════════════
-#  BINANCE IA (Crypto futures)
-# ══════════════════════════════════════════════════════
-AI_C   = defaultdict(lambda: defaultdict(deque))
-AI_P   = {}
-AI_PRS = []
-AI_REG = {"regime":"RANGING","min_score":72,"risk_mult":1.0,"lev_cap":15,"label":"Init"}
-AI_OT  = {}
-AI_TC  = 0
-AI_CD  = {}
-_ai_lk = threading.Lock()
-EXCH   = {}; EXCH_TS = 0
+    except Exception as ex:
+        q.put({"name": m["name"], "cat": m["cat"], "found": False,
+               "reason": str(ex)[:40], "improv": False})
 
 def b_get(ep, p=None):
     try:
@@ -1703,57 +1865,67 @@ def _mem_line(s):
     return f"│  {icon} Mémoire IA : <b>{wr}%</b> WR sur {t} trades  (+${round(pnl,2)})"
 
 def fmt_pro(s, news, sl_label):
-    se       = "🟢" if s["side"] == "BUY" else "🔴"
-    arrow    = "📈" if s["side"] == "BUY" else "📉"
-    sf       = "ACHAT" if s["side"] == "BUY" else "VENTE"
-    emo      = CAT_EMO.get(s["cat"], "📊")
-    liq      = s.get("liq") or {}
-    is_improv= False
-    sep      = "═" * 24
+    se    = "🟢" if s["side"] == "BUY"  else "🔴"
+    arrow = "📈" if s["side"] == "BUY"  else "📉"
+    sf    = "ACHAT" if s["side"] == "BUY" else "VENTE"
+    emo   = CAT_EMO.get(s["cat"], "📊")
+    liq   = s.get("liq") or {}
+    sep   = "═" * 24
 
-    sc       = s["score"]
+    sc         = s["score"]
     conf_txt, conf_ico = _confidence(sc)
-    risk_txt = _risk_advice(sc, "✅" in news, sl_label)
-    timing   = _entry_timing(s)
-    reason   = _trade_reason(s)
-    bar      = _score_bar(sc)
-    sn,_,_,_ = get_session()
-    news_lbl = "Calme" if "✅" in news else "Actif"
-    sp_s     = "OK" if s["sp"] < 3 else "Large"
-    mem_l    = _mem_line(s)
+    risk_txt   = _risk_advice(sc, "✅" in news, sl_label)
+    timing     = _entry_timing(s)
+    reason     = _trade_reason(s)
+    bar        = _score_bar(sc)
+    sn, _, _, _ = get_session()
+    news_lbl   = "Calme" if "✅" in news else "Actif"
+    sp_s       = "OK" if s["sp"] < 3 else "Large"
+    mem_l      = _mem_line(s)
+
+    # ── Bloc M5 (nouveau v11) ─────────────────────────────────────
+    m5_conf  = s.get("m5_conf", {})
+    tf_tag   = s.get("tf_tag", "M15+H1")
+    m5_ok    = m5_conf.get("ok", False)
+    m5_det   = m5_conf.get("details", "—")
+    if m5_ok:
+        m5_line = "│  M5 Entry : ✅ <b>{}</b>".format(m5_det)
+    else:
+        m5_line = "│  M5 Entry : ⚠️ {}".format(m5_det if m5_det != "M5 indispo" else "non disponible")
 
     lines = [
-        f"{arrow} {se} <b>{s['name']} — {sf}</b>  {emo}",
+        "{} {} <b>{} — {}</b>  {}".format(arrow, se, s["name"], sf, emo),
         sep,
-        f"{conf_ico} Confiance : <b>{conf_txt}</b>  ·  {sl_label}",
-        f"🕐 {s['time']} UTC",
+        "{} Confiance : <b>{}</b>  ·  {}".format(conf_ico, conf_txt, sl_label),
+        "🕐 {} UTC  ·  📊 {}".format(s["time"], tf_tag),
         "",
-        "┌─ <b>NIVEAUX</b> ──────────────────────",
-        f"│  Entree : <code>{s['entry']}</code>",
-        f"│  TP     : <code>{s['tp']}</code>",
-        f"│  SL     : <code>{s['sl']}</code>",
-        f"│  RR     : <b>1:{s['rr']}</b>",
-        "└────────────────────────────────",
+        "┌─ <b>NIVEAUX</b> ──────────────────────────",
+        "│  Entree : <code>{}</code>".format(s["entry"]),
+        "│  TP     : <code>{}</code>".format(s["tp"]),
+        "│  SL     : <code>{}</code>".format(s["sl"]),
+        "│  RR     : <b>1:{}</b>".format(s["rr"]),
+        "└──────────────────────────────────",
         "",
-        f"💵 Lot 0.01 : <b>+${s['g001']}</b> TP  /  <b>-${s['l001']}</b> SL",
-        f"💰 Lot 1.00 : <b>+${s['g1']}</b> TP  /  <b>-${s['l1']}</b> SL",
+        "💵 Lot 0.01 : <b>+${}</b> TP  /  <b>-${}</b> SL".format(s["g001"], s["l001"]),
+        "💰 Lot 1.00 : <b>+${}</b> TP  /  <b>-${}</b> SL".format(s["g1"],   s["l1"]),
         "",
-        "┌─ <b>ANALYSE</b> ────────────────────────",
-        f"│  Score    : [{bar}] <b>{sc}/100</b>",
-        f"│  Raison   : {reason}",
-        f"│  Tendance : <b>{s['bias']}</b>  ({s['btype']})",
-        f"│  Timing   : {timing}",
+        "┌─ <b>ANALYSE MULTI-TF</b> ─────────────────",
+        "│  Score    : [{}] <b>{}/100</b>".format(bar, sc),
+        "│  Tendance : <b>{}</b>  ({})  H1".format(s["bias"], s["btype"]),
+        "│  M15 OB   : ✅  Liquidité {}".format(liq.get("label", "✓")),
+        m5_line,
+        "│  Raison   : {}".format(reason),
+        "│  Timing   : {}".format(timing),
         mem_l,
-        "└────────────────────────────────",
+        "└──────────────────────────────────",
         "",
-        f"⚡ <b>Risk conseille</b> : {risk_txt}",
-        f"📰 News : {news_lbl}  ·  Spread : {sp_s}",
+        "⚡ <b>Risk conseillé</b> : {}".format(risk_txt),
+        "📰 News : {}  ·  Spread : {}".format(news_lbl, sp_s),
         sep,
         "⚠️ Analyse technique uniquement — pas un conseil financier",
-        "🤖 <b>AlphaBot PRO v10</b>  ·  @leaderodg_bot",
+        "🤖 <b>AlphaBot PRO v11</b>  ·  @leaderodg_bot",
     ]
     return "\n".join(l for l in lines if l is not None)
-
 
 def fmt_blocked(s):
     """Signal sniper score ≥ 90 — teaser professionnel pour FREE."""
@@ -1826,27 +1998,159 @@ def fmt_free(s, news, sl_label):
     ]
     return "\n".join(l for l in lines if l is not None)
 
-def fmt_scan(results,news,scan_t,sl_l,sm,nb):
-    st=daily_stats(); ch=chal_get(); reg=AI_REG
-    lines=["🔍 <b>SCAN {} UTC</b>  ·  {}".format(scan_t,sl_l),
-           "🎯 Score min:<b>{}</b>  ·  News:{}".format(sm,"✅" if "✅" in news else "⚠️"),
-           "💵 Confirmés: <b>+${}</b>  ·  {}✅ {}❌ {}🔄 ({} signaux)".format(st["g1"],st["wins"],st["losses"],st.get("open",0),st["n"]),
-           "🤖 IA: <b>{:.4f}$</b>  ·  Régime: {}".format(ch["balance"],reg.get("regime","?")),""]
-    cats={}
-    for r in results: cats.setdefault(r.get("cat","?"),[]).append(r)
-    for cat in ["METALS","CRYPTO","FOREX","INDICES","OIL"]:
-        if cat not in cats: continue
-        lines.append("{} <b>{}</b>".format(CAT_EMO.get(cat,"📊"),cat))
-        for r in cats[cat]:
+def fmt_scan(results, news, scan_t, sl_l, sm, nb):
+    """
+    Rapport de scan v11 — rebuildé complet :
+    - Statistiques session en tête
+    - Tableau par catégorie avec score + M5 status
+    - Indicateur qualité (ELITE / PREMIUM / SOLIDE / -)
+    - Résumé des rejets par cause (pour debug rapide)
+    - Challenge IA inline
+    """
+    st  = daily_stats()
+    ch  = chal_get()
+    reg = AI_REG
+    sn, _, sess_label, wknd = get_session()
+    news_ico = "✅" if "✅" in news else "⚠️"
+
+    # ── Comptage qualité des signaux ──────────────────────────────
+    elite   = sum(1 for r in results if r["found"] and r["signal"]["score"] >= 90)
+    premium = sum(1 for r in results if r["found"] and 80 <= r["signal"]["score"] < 90)
+    solide  = sum(1 for r in results if r["found"] and r["signal"]["score"] < 80)
+    total_sig = elite + premium + solide
+
+    # ── Comptage rejets par cause ─────────────────────────────────
+    reject_causes = {}
+    for r in results:
+        if not r["found"]:
+            raw   = r.get("reason", "?")
+            cause = (
+                "M5 ↔️" if "M5" in raw else
+                "No OB"  if "OB" in raw else
+                "Score"  if "Score" in raw or "score" in raw else
+                "RR"     if "RR"    in raw else
+                "Session" if "Session" in raw or "session" in raw else
+                "News"   if "News"  in raw else
+                "Spread" if "Spread" in raw else
+                "Data"   if any(x in raw for x in ("indispo", "insuffisant", "Timeout")) else
+                "Neutre" if "Neutre" in raw or "Neutral" in raw else
+                "Autre"
+            )
+            reject_causes[cause] = reject_causes.get(cause, 0) + 1
+
+    # ── Trier rejets par fréquence ────────────────────────────────
+    reject_line = "  ".join(
+        "{} ×{}".format(k, v)
+        for k, v in sorted(reject_causes.items(), key=lambda x: -x[1])
+    ) or "—"
+
+    sep = "═" * 24
+
+    lines = [
+        "🔍 <b>SCAN {} UTC</b>  ·  {}".format(scan_t, sess_label),
+        sep,
+        # Ligne 1 : session + score min + news
+        "📡 Session : <b>{}</b>  ·  Score min : <b>{}</b>  ·  News : {}".format(
+            sl_l, sm, news_ico),
+        # Ligne 2 : challenge IA + régime
+        "🤖 IA : <b>{:.4f}$</b>  ·  Régime : <b>{}</b>".format(
+            ch["balance"], reg.get("regime", "?")),
+        # Ligne 3 : stats du jour
+        "📊 Aujourd'hui : <b>{}✅  {}❌  {}🔄</b>  ({} signaux)  💵 +${}".format(
+            st["wins"], st["losses"], st.get("open", 0), st["n"], st["g1"]),
+        "",
+    ]
+
+    # ── Signaux trouvés (par catégorie) ───────────────────────────
+    if total_sig > 0:
+        lines.append("┌─ <b>SIGNAUX DÉTECTÉS</b> ─────────────────")
+        cats = {}
+        for r in results:
             if r["found"]:
-                s=r["signal"]; se="🟢" if s["side"]=="BUY" else "🔴"
-                tag=""
-                lines.append("  {} <b>{}</b>  {}{}  RR 1:{}  {}/100".format(se,r["name"],s["side"],tag,s["rr"],s["score"]))
-                lines.append("  📍<code>{}</code>→TP<code>{}</code> SL<code>{}</code>".format(s["entry"],s["tp"],s["sl"]))
-            else:
-                lines.append("  ⚪ <b>{}</b>  {}".format(r["name"],r.get("reason","?")))
+                cats.setdefault(r["cat"], []).append(r)
+
+        for cat in ["METALS", "CRYPTO", "FOREX", "INDICES", "OIL"]:
+            if cat not in cats:
+                continue
+            for r in cats[cat]:
+                s   = r["signal"]
+                se  = "🟢" if s["side"] == "BUY" else "🔴"
+                sc  = s["score"]
+                m5  = s.get("m5_conf", {})
+                m5_ico = "✅" if m5.get("ok") else "⚠️"
+
+                # Badge qualité
+                if sc >= 90:   ql = "🔥 ÉLITE"
+                elif sc >= 80: ql = "💎 PREMIUM"
+                else:          ql = "✅ SOLIDE"
+
+                lines.append(
+                    "│  {} <b>{}</b>  {}  {} {}  RR 1:{}  {}/100".format(
+                        se, s["name"], CAT_EMO.get(cat, "📊"),
+                        s["side"], ql, s["rr"], sc
+                    )
+                )
+                lines.append(
+                    "│    📍<code>{}</code> → TP <code>{}</code>  SL <code>{}</code>".format(
+                        s["entry"], s["tp"], s["sl"]
+                    )
+                )
+                lines.append(
+                    "│    📊 {} │ M5 {} {}".format(
+                        s.get("tf_tag", "M15+H1"), m5_ico, m5.get("details", "")
+                    )
+                )
+                lines.append("│")
+
+        lines.append("└──────────────────────────────────")
         lines.append("")
-    lines+=["═"*22,"🟢 <b>{} signal(s)</b>".format(nb) if nb else "🟡 Aucun signal","🔄 Prochain scan ~{}s".format(SCAN_SEC)]
+
+    # ── Marchés scannés sans signal ───────────────────────────────
+    no_sig = [r for r in results if not r["found"]]
+    if no_sig:
+        lines.append("┌─ <b>MARCHÉS ANALYSÉS</b> ─────────────────")
+        cats_no = {}
+        for r in no_sig:
+            cats_no.setdefault(r["cat"], []).append(r)
+        for cat in ["METALS", "CRYPTO", "FOREX", "INDICES", "OIL"]:
+            if cat not in cats_no:
+                continue
+            emo = CAT_EMO.get(cat, "📊")
+            for r in cats_no[cat]:
+                sc_val = r.get("sc", 0)
+                sm_val = r.get("s_min", sm)
+                m5_ok  = r.get("m5_ok")
+                m5_tag = " M5⚠️" if m5_ok is False else (" M5✅" if m5_ok else "")
+                reason = r.get("reason", "?")
+                # Affichage compact : paire + raison
+                if sc_val and sm_val:
+                    lines.append(
+                        "│  ⚪ {} <b>{}</b>  {}  [{}/{}]{}".format(
+                            emo, r["name"], reason[:22], sc_val, sm_val, m5_tag)
+                    )
+                else:
+                    lines.append(
+                        "│  ⚪ {} <b>{}</b>  {}{}".format(
+                            emo, r["name"], reason[:28], m5_tag)
+                    )
+        lines.append("└──────────────────────────────────")
+        lines.append("")
+
+    # ── Résumé rejets + pied de page ─────────────────────────────
+    lines.append("🔎 Rejets : {}".format(reject_line))
+    lines.append("")
+    lines.append(sep)
+    if total_sig > 0:
+        qual_parts = []
+        if elite:   qual_parts.append("🔥 {} ÉLITE".format(elite))
+        if premium: qual_parts.append("💎 {} PREMIUM".format(premium))
+        if solide:  qual_parts.append("✅ {} SOLIDE".format(solide))
+        lines.append("🟢 <b>{} signal(s)</b>  —  {}".format(
+            total_sig, "  ".join(qual_parts)))
+    else:
+        lines.append("🟡 Aucun signal ce cycle")
+    lines.append("🔄 Prochain scan ~{}s".format(SCAN_SEC))
+
     return "\n".join(lines)
 
 def fmt_daily(st, is_pro=True):
@@ -2057,7 +2361,10 @@ def _scan_inner():
 
     log("INFO", clr("Scan {} — {} — Score~{}".format(scan_t, sl_l, sm), "d"))
     news_ok, news_lbl = news_check()
-    active = [m for m in MARKETS if not wknd or m.get("crypto", False)]
+    # ── Filtre intelligent : jour + catégorie + paires sélectives ───
+    active = [m for m in MARKETS if allowed_market(m)]
+    if not active:
+        log("INFO", clr("Aucun marché actif pour ce créneau.", "y")); return
     q = Queue(); threads = []
     for m in active:
         # On passe False à agent_analyze
