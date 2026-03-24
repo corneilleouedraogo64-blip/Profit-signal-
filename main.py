@@ -1,10 +1,10 @@
-
 #!/usr/bin/env python3
 """
-AlphaBot PRO v10 — Agent IA Adaptatif
+AlphaBot PRO v17 — Agent IA Adaptatif
 • Bot Telegram FREE/PRO/VIP + paiement USDT auto
 • 20 marchés Forex/Métaux/Crypto/Indices/Pétrole
 • Cerveau ICT/SMC v2 + Analyse Multi-Timeframe
+• Tendance de fond : H1 (interne) | Entrée : M5 max M15
 • Si pas de setup parfait → l'agent allège les critères
   si tendance de fond + session + broker sont valides
 • Challenge IA 5$→500$ (Binance simulation)
@@ -31,7 +31,7 @@ DB_FILE      = "ab10.db"
 BINANCE_BASE = "https://fapi.binance.com/fapi/v1"
 
 PRO_PRICE  = 10;  REF_TARGET = 30;  REF_MONTHS = 3
-FREE_LIMIT = 4;   PRO_LIMIT  = 20;  NB_AGENTS  = 20
+FREE_LIMIT = 3;   PRO_LIMIT  = 15;  NB_AGENTS  = 20
 TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 30
 DAILY_HOUR = 20;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
 FEE_TAKER  = 0.0004
@@ -1421,10 +1421,13 @@ def agent_analyze(m, score_min, news_ok, q):
             if m1 and len(m1) >= 5: all_badges.append("M1✓")
 
             # Tag timeframe selon confirmations disponibles
-            tf_parts = ["H1", "M15"]
-            if m5_conf["ok"]: tf_parts.insert(1, "M5")
+            # H1 = tendance de fond (interne), entrée = M5 max M15
+            if m5_conf["ok"]:
+                tf_parts = ["M5", "M15"]
+            else:
+                tf_parts = ["M15"]
             if m1 and len(m1) >= 5: tf_parts.append("M1")
-            tf_tag = "+".join(tf_parts)
+            tf_tag = "+".join(tf_parts)  # ex: "M5+M15" ou "M15"
 
             dp = 2 if e > 1000 else (3 if e > 10 else 5)
             f  = lambda v: round(v, dp)
@@ -1907,11 +1910,15 @@ def fmt_pro(s, news, sl_label):
     else:
         m5_line = "│  M5 Entry : ⚠️ {}".format(m5_det if m5_det != "M5 indispo" else "non disponible")
 
+    # Contexte liquidité pour le cône
+    liq_label = liq.get("label", "✓")
+    liq_note = "✅ Prise confirmée" if "prise" in liq_label.lower() or "✓" in liq_label else "⚠️ Vérifier liquidité"
+
     lines = [
         "{} {} <b>{} — {}</b>  {}".format(arrow, se, s["name"], sf, emo),
         sep,
         "{} Confiance : <b>{}</b>  ·  {}".format(conf_ico, conf_txt, sl_label),
-        "🕐 {} UTC  ·  📊 {}".format(s["time"], tf_tag),
+        "🕐 {} UTC  ·  📐 Entrée : <b>{}</b>".format(s["time"], tf_tag),
         "",
         "┌─ <b>NIVEAUX</b> ──────────────────────────",
         "│  Entree : <code>{}</code>".format(s["entry"]),
@@ -1925,8 +1932,10 @@ def fmt_pro(s, news, sl_label):
         "",
         "┌─ <b>ANALYSE MULTI-TF</b> ─────────────────",
         "│  Score    : [{}] <b>{}/100</b>".format(bar, sc),
-        "│  Tendance : <b>{}</b>  ({})  H1".format(s["bias"], s["btype"]),
-        "│  M15 OB   : ✅  Liquidité {}".format(liq.get("label", "✓")),
+        "│  Tendance : <b>{}</b>  ({})  — fond H1".format(s["bias"], s["btype"]),
+        "│  Entrée   : ⚡ <b>{}</b>  (max M15)".format(tf_tag),
+        "│  Liquidité: {}  {}".format(liq_note, liq_label),
+        "│  OB M15   : ✅  Structure confirmée",
         m5_line,
         "│  Raison   : {}".format(reason),
         "│  Timing   : {}".format(timing),
@@ -1937,7 +1946,7 @@ def fmt_pro(s, news, sl_label):
         "📰 News : {}  ·  Spread : {}".format(news_lbl, sp_s),
         sep,
         "⚠️ Analyse technique uniquement — pas un conseil financier",
-        "🤖 <b>AlphaBot PRO v11</b>  ·  @leaderodg_bot",
+        "🤖 <b>AlphaBot PRO v17</b>  ·  @leaderodg_bot",
     ]
     return "\n".join(l for l in lines if l is not None)
 
@@ -2529,39 +2538,46 @@ def ai_scan_cycle():
     except Exception as e: log("WARN","[AI] {}".format(e))
 
 def broadcast_new_version():
-    """Envoie un message de mise à jour v15 à TOUS les utilisateurs."""
+    """Envoie un message de mise à jour à TOUS les utilisateurs avec leur lien de parrainage."""
     time.sleep(8)
-    users = all_users()
-    # Construire le lien d'invitation groupe public
-    pub_invite = "https://t.me/+{}".format(
-        CHANNEL_ID.lstrip("-100") if CHANNEL_ID.startswith("-100") else CHANNEL_ID.lstrip("-")
-    )
-    msg = (
-        "🚀 <b>AlphaBot PRO v15 — NOUVELLE VERSION !</b>\n"
-        "═"*22+"\n\n"
-        "✅ <b>Bug corrigé :</b> tu vas maintenant recevoir\n"
-        "<b>tous les signaux directement ici</b> !\n\n"
-        "📡 Forex · Or · BTC · Indices\n"
-        "📊 Analyse ICT/SMC + Score + RR\n"
-        "⚡ Entrée + TP + SL automatiques\n\n"
-        "━"*22+"\n"
-        "👇 <b>Clique pour activer :</b>"
-    )
-    kb = {"inline_keyboard": [
-        [{"text": "✅ Activer la nouvelle version", "callback_data": "start"}],
-        [{"text": "📢 Rejoindre le groupe public",  "url": pub_invite}],
-        [{"text": "💎 Devenir PRO — 10$/mois",      "callback_data": "pro"}],
-    ]}
-    count = 0
-    for uid in users:
+    users_data = db_all("SELECT user_id FROM users")
+    count = ok = fail = 0
+    for (fuid,) in users_data:
         try:
-            tg_send(uid, msg, kb=kb)
-            count += 1
+            ref_link = "https://t.me/{}?start={}".format(BOT_USER, fuid)
+            msg = (
+                "🚀 <b>AlphaBot PRO v17 — MISE À JOUR IMPORTANTE !</b>\n"
+                "═"*22+"\n\n"
+                "⚡ <b>Nouveau système de signaux plus précis</b>\n\n"
+                "🎯 <b>Comment ça marche désormais :</b>\n"
+                "  📊 <b>Tendance de fond</b> → analysée sur H1 (interne)\n"
+                "  ⚡ <b>Entrée réelle</b>    → M5 au grand maximum M15\n\n"
+                "✅ Plus de signaux sur H1 directement !\n"
+                "   Les entrées H1 nécessitent trop de marge\n"
+                "   et exposent à des pertes importantes.\n\n"
+                "🔍 <b>Chaque signal inclut désormais :</b>\n"
+                "  • Biais H1 (tendance fond)\n"
+                "  • Confirmation liquidité (sweep / EQH-EQL)\n"
+                "  • Entrée précise M5 ou M15\n"
+                "  • Order Block + FVG validés\n\n"
+                "━"*22+"\n"
+                "🤝 <b>Invite tes amis et gagne PRO GRATUIT :</b>\n"
+                "<code>{}</code>\n\n"
+                "👇 <b>Clique pour accéder au bot :</b>"
+            ).format(ref_link)
+            kb = {"inline_keyboard": [
+                [{"text": "✅ Accéder au bot",       "callback_data": "start"}],
+                [{"text": "💎 Devenir PRO",           "callback_data": "pro"}],
+                [{"text": "🤝 Mon lien parrainage",   "url": ref_link}],
+            ]}
+            tg_send(fuid, msg, kb=kb)
+            ok += 1; count += 1
             time.sleep(0.15)
         except Exception as e:
-            log("WARN", "broadcast_v15 uid={}: {}".format(uid, e))
-    log("INFO", clr("Broadcast v15 → {} membres".format(count), "b", "g"))
-    tg_send(ADMIN_ID, "📢 <b>Broadcast v15 OK</b>\n✅ {} membres notifiés".format(count))
+            fail += 1
+            log("WARN", "broadcast_v17 uid={}: {}".format(fuid, e))
+    log("INFO", clr("Broadcast v17 → {} membres ({} ok, {} fail)".format(count, ok, fail), "b", "g"))
+    tg_send(ADMIN_ID, "📢 <b>Broadcast v17 OK</b>\n✅ {} envoyés  ·  ❌ {} échecs".format(ok, fail))
 
 def do_backup():
     try:
@@ -3006,14 +3022,22 @@ def _fmt_daily_report(stats):
     perf = "\U0001f525\U0001f525" if stats["total_g1"] > 2000 else \
            "\U0001f525" if stats["total_g1"] > 1000 else "\U0001f4b0"
 
+    # Estimations par taille de lot
+    g_001 = stats["total_g001"]
+    g_01  = round(g_001 * 10, 2)
+    g_1   = stats["total_g1"]
+
     lines = [
         "\U0001f4af <b>RAPPORT DU JOUR \u2014 AlphaBot PRO</b> {}".format(perf),
         "\u2550" * 22,
         "\U0001f4c5 {}  \u00b7  Session fermée".format(date_fr), "",
         "\U0001f3af <b>BILAN GLOBAL</b>",
-        "  \u2705 TP atteints : <b>{}</b>  |  \u274c SL touchés : <b>{}</b>  |  <b>{}%</b> réussite".format(w, l, wr),
-        "  \U0001f4b5 Lot 0.01 : <b>+${}</b>  \u00b7  Lot 1.00 : <b>+${}</b>".format(
-            stats["total_g001"], stats["total_g1"]),
+        "  \u2705 TP : <b>{}</b>  |  \u274c SL : <b>{}</b>  |  <b>{}%</b> réussite".format(w, l, wr),
+        "",
+        "\U0001f4b0 <b>ESTIMATIONS DE GAINS :</b>",
+        "  Lot 0.01 → <b>+${}</b>".format(g_001),
+        "  Lot 0.10 → <b>+${}</b>".format(g_01),
+        "  Lot 1.00 → <b>+${}</b> 🔥".format(g_1),
         "", "\u2501" * 22,
         "\U0001f4cb <b>DÉTAIL DES TRADES</b>", ""
     ]
@@ -3043,12 +3067,12 @@ def _fmt_daily_report(stats):
 
     lines += [
         "\u2550" * 22,
-        "\U0001f4b0 Total lot 0.01 : <b>+${}</b>  \u00b7  Lot 1.00 : <b>+${}</b>".format(
-            stats["total_g001"], stats["total_g1"]),
+        "\U0001f4b0 <b>Total estimé :</b>",
+        "  Lot 0.01 : <b>+${}</b>  \u00b7  Lot 0.10 : <b>+${}</b>  \u00b7  Lot 1.00 : <b>+${}</b>".format(
+            g_001, g_01, g_1),
         "",
-        "\U0001f4e9 Rejoins AlphaBot PRO \u2014 {}$ USDT".format(PRO_PROMO),
-        "\U0001f449 @leaderodg_bot",
-        "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max"
+        "\U0001f4e9 /ref \u2014 Parraine tes amis = PRO GRATUIT !",
+        "\u26a0\ufe0f Not financial advice  \u00b7  Risk 1% max  \u00b7  @leaderodg_bot"
     ]
     return "\n".join(lines)
 
@@ -3307,8 +3331,9 @@ def _scan_and_send_inner():
     _last_scan_results = results
     cleanup_sent(date_str)
 
+    # Clé sans hour_str → 1 seul signal par paire/sens par JOUR (pas par heure)
     sigs_raw = [(r["signal"],
-                 "{}-{}-{}-{}".format(r["signal"]["name"], r["signal"]["side"], date_str, hour_str))
+                 "{}-{}-{}".format(r["signal"]["name"], r["signal"]["side"], date_str))
                 for r in results if r["found"]]
     with _sent_lock:
         sigs_raw = [(s, k) for s, k in sigs_raw if k not in _sent]
@@ -3324,17 +3349,17 @@ def _scan_and_send_inner():
         msg_pro  = fmt_signal_pro(sig, news_lbl, sl)
         msg_free = fmt_signal_free(sig, news_lbl, sl)
 
-        r = tg_send(CHANNEL_ID, msg_free)
-        if r.get("ok"):
-            with _sent_lock: _sent.add(key)
-            db_save_signal(sig, sn)
-            sc_txt = clr(sig["side"], "green") if sig["side"] == "BUY" else clr(sig["side"], "red")
-            log("SIGNAL", "{} {}  RR 1:{}  Score {}/{}  G1 +${}".format(
-                clr(sig["name"], "bold", "white"), sc_txt,
-                sig["rr"], sig["score"], sig.get("score_min", "?"), sig["g1"]))
+        # ── Enregistrement signal (plus d'envoi dans le groupe) ──────
+        with _sent_lock: _sent.add(key)
+        db_save_signal(sig, sn)
+        sc_txt = clr(sig["side"], "green") if sig["side"] == "BUY" else clr(sig["side"], "red")
+        log("SIGNAL", "{} {}  RR 1:{}  Score {}/{}  G1 +${}".format(
+            clr(sig["name"], "bold", "white"), sc_txt,
+            sig["rr"], sig["score"], sig.get("score_min", "?"), sig["g1"]))
 
         for puid in pro_users_eff:
             if db_count_today(puid) < PRO_LIMIT:
+                tg_sticker(puid, STK_SIGNAL)  # sticker avant signal
                 tg_send(puid, msg_pro)
                 db_count_increment(puid)
                 time.sleep(0.04)
@@ -3342,6 +3367,7 @@ def _scan_and_send_inner():
         for fuid in free_users_eff:
             c = db_count_today(fuid)
             if c < FREE_LIMIT:
+                tg_sticker(fuid, STK_SIGNAL)  # sticker avant signal
                 tg_send(fuid, msg_free)
                 db_count_increment(fuid)
                 time.sleep(0.04)
@@ -3362,9 +3388,12 @@ def _scan_and_send_inner():
         stats = db_daily_stats(date_str)
         if stats["sig_count"] > 0:
             daily = _fmt_daily_report(stats)
-            tg_send(CHANNEL_ID, daily)
-            for puid in pro_users:
-                tg_send(puid, daily); time.sleep(0.04)
+            # Envoi rapport en DM à TOUS les utilisateurs (FREE et PRO), pas dans le groupe
+            all_uids = list(set(pro_users + list(free_users_eff)))
+            for puid in all_uids:
+                tg_sticker(puid, STK_MONEY)
+                tg_send(puid, daily)
+                time.sleep(0.05)
             db_mark_report(stats); _last_daily = date_str
 
     week_key = "{}-W{}".format(now_dt.year, now_dt.isocalendar()[1])
@@ -3374,9 +3403,10 @@ def _scan_and_send_inner():
         ws = db_weekly_stats()
         if ws["sig_count"] > 0:
             weekly = _fmt_weekly_report(ws)
-            tg_send(CHANNEL_ID, weekly)
-            for puid in pro_users:
-                tg_send(puid, weekly); time.sleep(0.04)
+            # Envoi rapport hebdo en DM à tous, pas dans le groupe
+            all_uids_w = list(set(pro_users + list(free_users_eff)))
+            for puid in all_uids_w:
+                tg_send(puid, weekly); time.sleep(0.05)
             db_mark_report(ws, "weekly_reports"); _last_weekly = week_key
 
     expired = db_check_expiry()
@@ -4120,22 +4150,25 @@ def handle_activate(uid, target):
     if not target:
         tg_send(uid,
             "🛠 <b>COMMANDES ADMIN</b>\n\n"
-            "/activate ID    → Toggle PRO ↔ FREE\n"
-            "/activate @user → Par username\n"
-            "/degrade ID     → Forcer FREE\n"
-            "/testfree       → Simuler vue FREE\n"
-            "/testpro        → Retour vue PRO\n"
-            "/scan           → Forcer scan immédiat\n"
-            "/debug          → Raisons dernier scan\n"
-            "/resetcount [ID]→ Reset compteur signaux\n"
-            "/monstatus      → Statut admin complet\n"
-            "/stats          → Stats + paiements\n"
-            "/membres [n]    → Liste membres paginée\n\n"
+            "/activate ID        → Toggle PRO ↔ FREE\n"
+            "/activate @user     → Par username\n"
+            "/activatepro @user  → Force PRO sur un membre\n"
+            "/activateall        → 🔥 PRO pour TOUS les FREE\n"
+            "/degrade ID         → Forcer FREE\n"
+            "/testfree           → Simuler vue FREE\n"
+            "/testpro            → Retour vue PRO\n"
+            "/scan               → Forcer scan immédiat\n"
+            "/debug              → Raisons dernier scan\n"
+            "/resetcount [ID]    → Reset compteur signaux\n"
+            "/monstatus          → Statut admin complet\n"
+            "/stats              → Stats + paiements\n"
+            "/membres [n]        → Liste membres paginée\n\n"
             "<b>Toggle rapide ↓</b>",
             kb={"inline_keyboard": [
                 [{"text": "📋 Liste membres", "callback_data": "adm_membres_1"},
                  {"text": "📊 Stats",          "callback_data": "adm_stats"}],
-                [{"text": "💰 Paiements",       "callback_data": "adm_payments"}],
+                [{"text": "💰 Paiements",       "callback_data": "adm_payments"},
+                 {"text": "🔥 Activer TOUS",    "callback_data": "adm_activateall"}],
             ]})
         return
     try:
@@ -4186,7 +4219,32 @@ def handle_activate(uid, target):
         tg_send(uid, "❌ Erreur : {}".format(ex))
 
 
-def handle_admin_broadcast_start(uid, target):
+def _handle_activateall(uid):
+    """Active PRO À VIE pour TOUS les membres FREE. Admin seulement."""
+    if uid != ADMIN_ID: return
+    free = free_users()
+    if not free:
+        tg_send(uid, "ℹ️ Aucun membre FREE à activer."); return
+    tg_send(uid, "⏳ <b>Activation en cours...</b>\n{} membres FREE à passer PRO.".format(len(free)))
+    ok = fail = 0
+    for fuid in free:
+        try:
+            db_activate_pro(fuid, "ADMIN_BULK", days=None)
+            tg_send(fuid,
+                "🎉 <b>PRO activé !</b>\n\n"
+                "✅ Max {} signaux/jour\n"
+                "✅ Tous les marchés + analyses complètes\n"
+                "✅ Rapports quotidiens + hebdo\n"
+                "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
+            ok += 1; time.sleep(0.07)
+        except: fail += 1
+    tg_sticker(uid, STK_CROWN)
+    tg_send(uid,
+        "✅ <b>Activation groupée terminée !</b>\n\n"
+        "💎 PRO activés : <b>{}</b>\n"
+        "❌ Échecs : <b>{}</b>\n\n"
+        "/membres pour voir la liste".format(ok, fail))
+    log("INFO", clr("ActivateAll: {} → PRO, {} échecs".format(ok, fail), "g"))
     nb = len(db_get_pro_users()) + len(db_get_free_users()) if target == "ALL" else len(db_get_pro_users())
     # Enregistrer l'état en attente de message
     _broadcast_pending[uid] = {"target": target, "step": "waiting"}
@@ -5842,6 +5900,14 @@ def dispatch(uid, uname, txt):
             handle_activate(uid, arg); return
         if cmd == "degrade":
             handle_degrade(uid, arg); return
+        if cmd == "activateall":
+            # Active PRO pour TOUS les membres FREE
+            threading.Thread(target=_handle_activateall, args=(uid,), daemon=True).start(); return
+        if cmd == "activatepro":
+            # /activatepro @username ou /activatepro ID
+            if not arg:
+                tg_send(uid, "Usage : /activatepro @username  ou  /activatepro ID"); return
+            handle_activate(uid, arg.strip()); return
         if cmd == "testfree":
             handle_testfree(uid); return
         if cmd == "testpro":
@@ -5932,6 +5998,14 @@ def dispatch_cb(cb):
     # ── Admin ─────────────────────────────────────────────────
     elif data == "adm_panel" and uid == ADMIN_ID:
         threading.Thread(target=send_admin_full, args=(uid,), daemon=True).start()
+    elif data == "adm_activateall" and uid == ADMIN_ID:
+        tg_send(uid, "⚠️ <b>Confirmes-tu l'activation PRO pour TOUS les membres FREE ?</b>",
+            kb={"inline_keyboard": [
+                [{"text": "✅ OUI — Activer TOUS", "callback_data": "adm_activateall_confirm"}],
+                [{"text": "❌ Annuler",              "callback_data": "adm_panel"}],
+            ]})
+    elif data == "adm_activateall_confirm" and uid == ADMIN_ID:
+        threading.Thread(target=_handle_activateall, args=(uid,), daemon=True).start()
     elif data == "adm_stats" and uid == ADMIN_ID:
         threading.Thread(target=send_admin_stats_full, args=(uid,), daemon=True).start()
     elif data == "adm_pays" and uid == ADMIN_ID:
@@ -6670,3 +6744,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
