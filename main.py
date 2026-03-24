@@ -2434,34 +2434,26 @@ def _scan_inner():
             chart_img = generate_signal_chart(sig, m15_c)
         except: pass
 
-        # ── Groupe FREE → signal simplifié ───────────────────────────
-        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
-        time.sleep(0.15)
-        if chart_img:
-            r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_f[:1024])
-        else:
-            r = tg_send(CHANNEL_ID, msg_f)
-        # Motivation upgrade dans le groupe FREE
+        # ── Groupe FREE → 1 seul message : signal + promo ───────────
         ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
-        time.sleep(1)
-        tg_send(CHANNEL_ID,
-            "💡 <b>Signal disponible — version complète en PRO</b>\n"
-            "━"*22+"\n\n"
-            "Ce signal inclut en PRO :\n"
-            "  🎯 TP · SL · Entrée exacte M5/M15\n"
-            "  📊 Score ICT + analyse complète\n"
-            "  📩 Reçu directement en message privé\n\n"
-            "🎁 <b>Rejoins via ce lien = PRO OFFERT :</b>\n"
-            "<code>{}</code>".format(ref_admin),
-            kb={"inline_keyboard": [
-                [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
-                [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
-                 {"text": "👑 Groupe PRO",  "url": VIP_GROUP_LINK}],
-            ]})
+        promo_footer = (
+            "\n━"*1+"━"*21+"\n"
+            "💎 <b>Version complète (TP/SL/Score) → PRO</b>\n"
+            "🎁 Rejoins via : <code>{}</code>\n"
+            "📸 Partage à 10 amis avec capture = PRO offert"
+        ).format(ref_admin)
+        msg_free_with_promo = msg_f + promo_footer
+        if chart_img:
+            r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_free_with_promo[:1024])
+        else:
+            r = tg_send(CHANNEL_ID, msg_free_with_promo,
+                        kb={"inline_keyboard": [
+                            [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
+                            [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
+                             {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
+                        ]})
 
-        # ── Groupe VIP → signal complet PRO ─────────────────────────
-        tg_req("sendSticker", {"chat_id": str(VIP_CH), "sticker": stk})
-        time.sleep(0.15)
+        # ── Groupe VIP → 1 seul message : signal PRO complet ────────
         if chart_img:
             tg_send_photo(VIP_CH, chart_img, caption=msg_p[:1024])
         else:
@@ -2474,35 +2466,18 @@ def _scan_inner():
             log("SIG", "{} {} RR:1:{} Sc:{} G1:+${}".format(
                 clr(sig["name"], "b", "c"), sig["side"], sig["rr"], sc, sig["g1"]))
 
-        # ── Notifications individuelles ──────────────────────────────
+        # ── DM individuels : 1 message par utilisateur ───────────────
         for uid in all_users():
             try:
                 pro = is_pro(uid)
                 c   = count_today(uid)
                 if pro:
-                    # PRO → signal complet sans limite
-                    if chart_img:
-                        tg_send_photo(uid, chart_img, caption=msg_p[:1024])
-                    else:
-                        tg_send(uid, msg_p)
+                    tg_send(uid, msg_p)
                     count_incr(uid)
                 elif c < FREE_LIMIT:
-                    # FREE → signal simplifié dans la limite
-                    if chart_img:
-                        tg_send_photo(uid, chart_img, caption=msg_f[:1024])
-                    else:
-                        tg_send(uid, msg_f)
+                    tg_send(uid, msg_f)
                     count_incr(uid)
-                elif c == FREE_LIMIT:
-                    # FREE → limite atteinte → promo Exness + activer PRO
-                    tg_send(uid, MSG_PROMO_FREE,
-                            kb={"inline_keyboard":[
-                                [{"text":"🔗 Ouvrir Exness","url":BROKER_LINK}],
-                                [{"text":"💎 Activer PRO","callback_data":"pro"}],
-                                [{"text":"📩 Contacter admin","url":"https://t.me/leaderOdg"}]
-                            ]})
-                    count_incr(uid)
-                # Si c > FREE_LIMIT → silence, pas de spam
+                # Au-delà de la limite → silence total (pas de message)
                 time.sleep(0.06)
             except Exception as _e:
                 log("WARN", "Notif uid={}: {}".format(uid, _e))
@@ -2515,27 +2490,45 @@ def _scan_inner():
                 "🔍 Scan {} — Aucun setup propre ce cycle.\n"
                 "Marchés actifs mais conditions insuffisantes (score < 85 ou liquidité absente).\n"
                 "Prochaine analyse dans {}s.".format(scan_t, SCAN_SEC))
-    # Rapport quotidien — envoyé à TOUS (PRO version complète, FREE version résumé)
-    if int(hs)>=DAILY_HOUR and _last_d!=ds and not rep_sent(ds):
-        st=daily_stats(ds)
-        if st["n"]>0:
-            d_pro=fmt_daily(st,is_pro=True)
-            d_free=fmt_daily(st,is_pro=False)
+    # ── Rapport soir 20h UTC — UNE SEULE FOIS ───────────────────────
+    # Déclenché uniquement à l'heure exacte (pas >= pour éviter toutes les minutes)
+    if int(hs) == DAILY_HOUR and _last_d != ds and not rep_sent(ds):
+        st = daily_stats(ds)
+        if st["n"] > 0:
+            d_pro  = fmt_daily(st, is_pro=True)
+            d_free = fmt_daily(st, is_pro=False)
             if d_pro:
-                tg_send(CHANNEL_ID,d_pro)
-                for puid in pru: tg_send(puid,d_pro); time.sleep(0.04)
+                ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
+                free_footer = (
+                    "\n━"*1+"━"*21+"\n"
+                    "💎 Passe en PRO pour les signaux complets\n"
+                    "🎁 <code>{}</code>\n"
+                    "📸 Partage à 10 amis avec preuve = PRO offert"
+                ).format(ref_admin)
+                # Groupe FREE : rapport + promo
+                tg_send(CHANNEL_ID, d_free + free_footer,
+                        kb={"inline_keyboard": [
+                            [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
+                            [{"text": "👑 Groupe VIP", "url": VIP_GROUP_LINK}],
+                        ]})
+                # Groupe VIP : rapport complet PRO
+                tg_send(VIP_CH, d_pro)
+                # DM PRO
+                for puid in pru:
+                    tg_send(puid, d_pro); time.sleep(0.04)
+                # DM FREE
                 for fuid in free_users():
-                    tg_send(fuid,d_free); time.sleep(0.04)
-                mark_rep(st); _last_d=ds
-    # Rapport hebdo
-    wk="{}-W{}".format(now.year,now.isocalendar()[1])
-    if wd==WEEKLY_DAY and int(hs)>=WEEKLY_HOUR and _last_w!=wk and not rep_sent(wk,"weekly_rep","week_start"):
-        ws=weekly_stats()
-        if ws["n"]>0:
-            wmsg="🏆 <b>RAPPORT HEBDO AlphaBot PRO</b>\n═"*1+"═"*21+"\n\n📅 Semaine du {}\n\n💵 Lot 0.01: +${}\n💰 Lot 1.00: +${}\n\n📡 {} signaux  ·  {} wins  ·  {}%\n\n📩 @leaderodg_bot  ·  {}$ USDT".format(ws["ws"],ws["g001"],ws["g1"],ws["n"],ws["wins"],int(ws["wins"]/ws["n"]*100) if ws["n"] else 0,PRO_PRICE)
-            tg_send(CHANNEL_ID,wmsg)
-            for puid in pru: tg_send(puid,wmsg); time.sleep(0.04)
-            mark_rep(ws,"weekly_rep"); _last_w=wk
+                    tg_send(fuid, d_free); time.sleep(0.04)
+                mark_rep(st); _last_d = ds
+    # Rapport hebdo (DM uniquement, pas dans les groupes)
+    wk = "{}-W{}".format(now.year, now.isocalendar()[1])
+    if wd == WEEKLY_DAY and int(hs) == WEEKLY_HOUR and _last_w != wk and not rep_sent(wk, "weekly_rep", "week_start"):
+        ws = weekly_stats()
+        if ws["n"] > 0:
+            wmsg = "🏆 <b>RAPPORT HEBDO AlphaBot PRO</b>\n"+"═"*22+"\n\n📅 Semaine du {}\n\n💵 Lot 0.01: +${}\n💰 Lot 1.00: +${}\n\n📡 {} signaux  ·  {} wins  ·  {}%\n\n📩 @leaderodg_bot  ·  {}$ USDT".format(ws["ws"],ws["g001"],ws["g1"],ws["n"],ws["wins"],int(ws["wins"]/ws["n"]*100) if ws["n"] else 0,PRO_PRICE)
+            for puid in pru:
+                tg_send(puid, wmsg); time.sleep(0.04)
+            mark_rep(ws, "weekly_rep"); _last_w = wk
     # Expirations
     for uid,uname in check_expiry():
         _,_,src=get_pro_info(uid)
@@ -3417,30 +3410,22 @@ def _scan_and_send_inner():
         sc       = sig.get("score", 0)
         stk      = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
-        # ── Groupe FREE → signal simplifié + motivation ──────────────
-        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
-        time.sleep(0.15)
-        tg_send(CHANNEL_ID, msg_free)
+        # ── Groupe FREE → 1 seul message ────────────────────────────
         ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
-        time.sleep(1)
-        tg_send(CHANNEL_ID,
-            "💡 <b>Signal disponible — version complète en PRO</b>\n"
-            "━"*22+"\n\n"
-            "Ce signal inclut en PRO :\n"
-            "  🎯 TP · SL · Entrée exacte M5/M15\n"
-            "  📊 Score ICT + analyse complète\n"
-            "  📩 Reçu directement en message privé\n\n"
-            "🎁 <b>Rejoins via ce lien = PRO OFFERT :</b>\n"
-            "<code>{}</code>".format(ref_admin),
-            kb={"inline_keyboard": [
-                [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
-                [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
-                 {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
-            ]})
+        promo_footer = (
+            "\n━"*1+"━"*21+"\n"
+            "💎 <b>Version complète (TP/SL/Score) → PRO</b>\n"
+            "🎁 Rejoins : <code>{}</code>\n"
+            "📸 Partage à 10 amis avec preuve = PRO offert"
+        ).format(ref_admin)
+        tg_send(CHANNEL_ID, msg_free + promo_footer,
+                kb={"inline_keyboard": [
+                    [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
+                    [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
+                     {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
+                ]})
 
-        # ── Groupe VIP → signal complet ──────────────────────────────
-        tg_req("sendSticker", {"chat_id": str(VIP_CH), "sticker": stk})
-        time.sleep(0.15)
+        # ── Groupe VIP → 1 seul message PRO complet ─────────────────
         tg_send(VIP_CH, msg_pro)
 
         # ── Enregistrement signal ────────────────────────────────────
@@ -3452,9 +3437,9 @@ def _scan_and_send_inner():
             clr(sig["name"], "bold", "white"), sc_txt,
             sig["rr"], sig["score"], sig.get("score_min", "?"), sig["g1"]))
 
+        # ── DM individuels : 1 message, sans sticker ─────────────────
         for puid in pro_users_eff:
             if db_count_today(puid) < PRO_LIMIT:
-                tg_sticker(puid, STK_SIGNAL)  # sticker avant signal
                 tg_send(puid, msg_pro)
                 db_count_increment(puid)
                 time.sleep(0.04)
@@ -3462,45 +3447,52 @@ def _scan_and_send_inner():
         for fuid in free_users_eff:
             c = db_count_today(fuid)
             if c < FREE_LIMIT:
-                tg_sticker(fuid, STK_SIGNAL)  # sticker avant signal
                 tg_send(fuid, msg_free)
                 db_count_increment(fuid)
                 time.sleep(0.04)
-            elif c == FREE_LIMIT:
-                tg_send(fuid,
-                    "\U0001f6d1 <b>Limite FREE : {}/{}</b>\n\n"
-                    "Pour signaux illimités : /pay \u2014 {}$ USDT\n"
-                    "Ou parraine {} amis = {} mois PRO !".format(
-                        FREE_LIMIT, FREE_LIMIT, PRO_PROMO, REF_TARGET, REF_MONTHS))
-                db_count_increment(fuid)
-                time.sleep(0.04)
+            # Au-delà de la limite FREE → silence total
 
     if not sigs_raw:
         log("INFO", clr("Aucun setup valide ce cycle.", "dim"))
-    # Scan summary supprimé — admin peut voir via /scan
 
-    if int(hour_str) >= DAILY_HOUR and _last_daily != date_str and not db_report_sent(date_str):
+    # ── Rapport soir 20h UTC — UNE SEULE FOIS ────────────────────────
+    # == DAILY_HOUR et non >= pour ne pas se déclencher chaque minute
+    if int(hour_str) == DAILY_HOUR and _last_daily != date_str and not db_report_sent(date_str):
         stats = db_daily_stats(date_str)
         if stats["sig_count"] > 0:
-            daily = _fmt_daily_report(stats)
-            # Envoi rapport en DM à TOUS les utilisateurs (FREE et PRO), pas dans le groupe
+            daily_pro  = _fmt_daily_report(stats)
+            daily_free = _fmt_daily_report(stats)  # même format pour FREE
+            ref_admin2 = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
+            free_foot = (
+                "\n━"*1+"━"*21+"\n"
+                "💎 Passe en PRO pour les signaux complets\n"
+                "🎁 <code>{}</code>"
+            ).format(ref_admin2)
+            # Groupe FREE : rapport + promo
+            tg_send(CHANNEL_ID, daily_free + free_foot,
+                    kb={"inline_keyboard": [
+                        [{"text": "🎁 Activer PRO gratuit", "url": ref_admin2}],
+                        [{"text": "👑 Groupe VIP", "url": VIP_GROUP_LINK}],
+                    ]})
+            # Groupe VIP : rapport complet
+            tg_send(VIP_CH, daily_pro)
+            # DM à tous
             all_uids = list(set(pro_users + list(free_users_eff)))
             for puid in all_uids:
-                tg_sticker(puid, STK_MONEY)
-                tg_send(puid, daily)
+                is_p = puid in pro_users
+                tg_send(puid, daily_pro if is_p else daily_free)
                 time.sleep(0.05)
             db_mark_report(stats); _last_daily = date_str
 
     week_key = "{}-W{}".format(now_dt.year, now_dt.isocalendar()[1])
-    if (wday == WEEKLY_DAY and int(hour_str) >= WEEKLY_HOUR
+    if (wday == WEEKLY_DAY and int(hour_str) == WEEKLY_HOUR
             and _last_weekly != week_key
             and not db_report_sent(week_key, "weekly_reports", "week_start")):
         ws = db_weekly_stats()
         if ws["sig_count"] > 0:
             weekly = _fmt_weekly_report(ws)
-            # Envoi rapport hebdo en DM à tous, pas dans le groupe
-            all_uids_w = list(set(pro_users + list(free_users_eff)))
-            for puid in all_uids_w:
+            # Rapport hebdo → DM PRO uniquement (pas dans les groupes)
+            for puid in pro_users:
                 tg_send(puid, weekly); time.sleep(0.05)
             db_mark_report(ws, "weekly_reports"); _last_weekly = week_key
 
