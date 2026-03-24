@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 AlphaBot PRO v17 — Agent IA Adaptatif
@@ -30,8 +31,12 @@ BROKER_LINK  = "https://one.exnessonelink.com/a/nb3fx0bpnm"
 DB_FILE      = "ab10.db"
 BINANCE_BASE = "https://fapi.binance.com/fapi/v1"
 
+# ── Liens d'invitation groupes (à mettre à jour si lien change) ─
+FREE_GROUP_LINK = os.getenv("FREE_GROUP_LINK", "https://t.me/+alphabotfree")   # ← remplace par ton vrai lien groupe FREE
+VIP_GROUP_LINK  = os.getenv("VIP_GROUP_LINK",  "https://t.me/+alphabotvip")    # ← remplace par ton vrai lien groupe VIP
+
 PRO_PRICE  = 10;  REF_TARGET = 30;  REF_MONTHS = 3
-FREE_LIMIT = 3;   PRO_LIMIT  = 15;  NB_AGENTS  = 20
+FREE_LIMIT = 3;   PRO_LIMIT  = 10;  NB_AGENTS  = 20
 TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 30
 DAILY_HOUR = 20;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
 FEE_TAKER  = 0.0004
@@ -39,6 +44,11 @@ CHALLENGE_START = float(os.getenv("CHALLENGE_START", "5.0"))
 MAX_OPEN   = 3;  COOLDOWN_MIN = 25
 FLOOR_USD  = 2.0; DD_LIMIT = 0.35
 AM_MULT    = 1.30; AM_MAX = 4
+
+# ── Throttle signaux ────────────────────────────────────────────
+MAX_SIG_PER_HOUR  = 1   # strict : 1 seul signal par heure glissante
+MAX_SIG_PER_DAY   = 10  # max global par jour (PRO: limité par PRO_LIMIT)
+MIN_GAP_BETWEEN   = 30  # minutes minimum entre 2 signaux consécutifs
 
 MARKETS = [
     {"sym":"GC=F",     "name":"XAUUSD","cat":"METALS","pip":0.01,  "max_sp":70,"vol":5,"crypto":False},
@@ -471,6 +481,27 @@ def db_register(uid, uname, ref_by=0, tg_fn=None):
             now=datetime.now().strftime("%Y-%m-%d")
             cur.execute("INSERT INTO users(user_id,username,plan,ref_by,joined) VALUES(?,?,?,?,?)",(uid,uname or "","FREE",ref_by,now))
             con.commit()
+            # ── Auto-PRO si rejoint via lien admin ───────────────────
+            if ref_by == ADMIN_ID and uid != ADMIN_ID:
+                con.close()
+                db_pro(uid, "ADMIN_REF", days=30)  # 30 jours PRO offerts
+                if tg_fn:
+                    tg_fn(uid,
+                        "🎁 <b>PRO OFFERT — Bienvenue !</b>\n"
+                        "═"*22+"\n\n"
+                        "✅ Tu as rejoint via le lien officiel AlphaBot.\n"
+                        "<b>30 jours PRO offerts !</b>\n\n"
+                        "📡 Tu reçois maintenant :\n"
+                        "  🎯 Signaux complets M5/M15\n"
+                        "  📊 TP · SL · Score ICT\n"
+                        "  📩 Directement en DM\n\n"
+                        "👑 Rejoins le groupe VIP :",
+                        kb={"inline_keyboard": [
+                            [{"text": "👑 Rejoindre groupe VIP", "url": VIP_GROUP_LINK}],
+                            [{"text": "🤖 Démarrer le bot", "callback_data": "start"}],
+                        ]})
+                    tg_fn(ADMIN_ID, "🎁 Auto-PRO : @{} <code>{}</code> (via ton lien)".format(uname or "?", uid))
+                return
             if ref_by and ref_by!=uid:
                 cur.execute("UPDATE users SET ref_count=ref_count+1 WHERE user_id=?",(ref_by,))
                 cur.execute("SELECT ref_count FROM users WHERE user_id=?",(ref_by,))
@@ -2262,6 +2293,49 @@ _last_scan_results = []
 _payment_state     = _pay_state
 _broadcast_pending = {}    # partagé avec _bcast_pending
 
+# ── Throttle global signaux ──────────────────────────────────────
+_sig_timestamps    = deque()   # timestamps UTC des signaux envoyés (glissant 24h)
+_sig_ts_lock       = threading.Lock()
+
+def _throttle_allowed(now_dt):
+    """
+    Retourne (ok, reason) :
+    - Vérifie max MAX_SIG_PER_HOUR sur 60 minutes glissantes
+    - Vérifie max MAX_SIG_PER_DAY sur la journée UTC
+    - Vérifie gap minimum MIN_GAP_BETWEEN entre 2 signaux
+    """
+    with _sig_ts_lock:
+        # Nettoyer timestamps > 24h
+        cutoff24 = now_dt - timedelta(hours=24)
+        while _sig_timestamps and _sig_timestamps[0] < cutoff24:
+            _sig_timestamps.popleft()
+
+        # Check journalier
+        today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = sum(1 for t in _sig_timestamps if t >= today_start)
+        if today_count >= MAX_SIG_PER_DAY:
+            return False, "Limite jour atteinte ({}/{})".format(today_count, MAX_SIG_PER_DAY)
+
+        # Check horaire glissant
+        cutoff1h = now_dt - timedelta(hours=1)
+        hour_count = sum(1 for t in _sig_timestamps if t >= cutoff1h)
+        if hour_count >= MAX_SIG_PER_HOUR:
+            return False, "Limite heure atteinte ({}/{})".format(hour_count, MAX_SIG_PER_HOUR)
+
+        # Check gap minimum
+        if _sig_timestamps:
+            last_ts = _sig_timestamps[-1]
+            gap_min = (now_dt - last_ts).total_seconds() / 60
+            if gap_min < MIN_GAP_BETWEEN:
+                return False, "Trop tôt ({:.0f}min < {}min)".format(gap_min, MIN_GAP_BETWEEN)
+
+        return True, "OK"
+
+def _throttle_record(now_dt):
+    """Enregistre un signal envoyé dans le compteur glissant."""
+    with _sig_ts_lock:
+        _sig_timestamps.append(now_dt)
+
 def cleanup_sent(ds):
     global _sent
     with _sent_lk: _sent={k for k in _sent if ds in k}
@@ -2273,87 +2347,12 @@ def cleanup_sent(ds):
 _last_session_reported = ""
 
 def check_session_end_report():
-    """
-    Détecte la fin d'une session et envoie un rapport.
-    Sessions avec rapport : LONDON_KZ (fin 10h), NY (fin 21h), OVERLAP (fin 16h)
-    """
-    global _last_session_reported
-    now = datetime.now(timezone.utc)
-    h, m = now.hour, now.minute
-    # Fin de session = première minute après la fin
-    session_ends = {
-        10: ("LONDON_KZ", "🇬🇧 London Kill Zone"),
-        12: ("LONDON",    "🇬🇧 Londres AM"),
-        16: ("OVERLAP",   "🇬🇧+🇺🇸 London+NY"),
-        21: ("NY",        "🇺🇸 New York"),
-    }
-    if h in session_ends and m == 0:
-        sess_key = session_ends[h][0]
-        sess_lbl = session_ends[h][1]
-        report_key = "{}-{}-{}".format(
-            now.strftime("%Y-%m-%d"), h, sess_key)
-        if report_key == _last_session_reported:
-            return
-        _last_session_reported = report_key
-        threading.Thread(
-            target=_send_session_report,
-            args=(sess_lbl, h),
-            daemon=True
-        ).start()
+    """Rapports de session désactivés — rapport soir uniquement à 20h UTC."""
+    pass  # Désactivé v17 : trop de messages intermédiaires
 
 def _send_session_report(sess_label, end_hour):
-    """Envoie le rapport de performance d'une session terminée."""
-    try:
-        # Signaux des 4 dernières heures (durée d'une session)
-        now = datetime.now(timezone.utc)
-        since = (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M")
-        con = _conn(); cur = con.cursor()
-        cur.execute(
-            "SELECT pair,side,rr,g001,g1,l001,l1,mode FROM signals "
-            "WHERE sent_at >= ? ORDER BY sent_at",
-            (since,))
-        rows = cur.fetchall(); con.close()
-        if not rows:
-            return  # Pas de signaux cette session → pas de rapport
-        wins = sum(1 for r in rows if r[2] >= 2.5)
-        losses = len(rows) - wins
-        wr = round(wins / len(rows) * 100) if rows else 0
-        total_g001 = round(sum(r[3] for r in rows), 2)
-        total_g1   = round(sum(r[4] for r in rows), 2)
-        perf = "🔥" if total_g1 > 500 else "💰" if total_g1 > 100 else "📊"
-        sep = "=" * 22
-        msg = (
-            "📊 <b>RAPPORT SESSION — {}</b> {}\n" + sep + "\n\n"
-            "⏱ Session terminée à {}h UTC\n\n"
-            "📡 <b>{}</b> signaux  ·  {} ✅  ·  {} ❌  ·  <b>{}%</b> WR\n"
-            "💵 Lot 0.01 : <b>+${}</b>\n"
-            "💰 Lot 1.00 : <b>+${}</b>\n"
-            "{}\n\n"
-        ).format(
-            sess_label, perf, end_hour,
-            len(rows), wins, losses, wr,
-            total_g001, total_g1,
-            )
-        # Détail trades
-        sep2 = "=" * 22
-        for row in rows:
-            pair, side, rr, g001, g1, l001, l1, mode = row
-            ok  = rr >= 2.5
-            d   = "UP" if side == "BUY" else "DOWN"
-            tag = " IMPROV" if mode != "NORMAL" else ""
-            res = "+${:.0f}".format(g1) if ok else "-${:.0f}".format(l1)
-            msg += "{} {} {} {} {} RR 1:{} {}\n".format(
-                "OK" if ok else "SL", pair, tag, d, side, rr, res)
-        msg += "\n" + sep2 + "\n"
-        msg += "AlphaBot PRO · @leaderodg_bot"
-        tg_send(CHANNEL_ID, msg)
-        for puid in pro_users():
-            tg_send(puid, msg)
-            time.sleep(0.04)
-        log("INFO", clr("Rapport session {} envoyé ({} signaux)".format(
-            sess_label, len(rows)), "g"))
-    except Exception as e:
-        log("WARN", "session_report: {}".format(e))
+    """Désactivé v17 — rapport soir uniquement."""
+    pass
 
 def scan_and_send():
     global _scan_run
@@ -2414,6 +2413,13 @@ def _scan_inner():
     ).format(FREE_LIMIT, BROKER_LINK, PRO_PRICE)
 
     for sig, key in sigs:
+        # ── Throttle global : max 3/h, max 6/j, gap 15min ──────────
+        now_check = datetime.now(timezone.utc).replace(tzinfo=None)
+        ok_send, reason_throttle = _throttle_allowed(now_check)
+        if not ok_send:
+            log("INFO", clr("Signal {} ignoré — {}".format(sig["name"], reason_throttle), "yellow"))
+            continue
+
         sc  = sig.get("score", 0)
         stk = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
@@ -2428,16 +2434,32 @@ def _scan_inner():
             chart_img = generate_signal_chart(sig, m15_c)
         except: pass
 
-        # ── MAX 2 MESSAGES : sticker + signal ────────────────────────
-        # Groupe PUBLIC (FREE) — message 1 : sticker, message 2 : signal
+        # ── Groupe FREE → signal simplifié ───────────────────────────
         tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
         time.sleep(0.15)
         if chart_img:
             r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_f[:1024])
         else:
             r = tg_send(CHANNEL_ID, msg_f)
+        # Motivation upgrade dans le groupe FREE
+        ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
+        time.sleep(1)
+        tg_send(CHANNEL_ID,
+            "💡 <b>Signal disponible — version complète en PRO</b>\n"
+            "━"*22+"\n\n"
+            "Ce signal inclut en PRO :\n"
+            "  🎯 TP · SL · Entrée exacte M5/M15\n"
+            "  📊 Score ICT + analyse complète\n"
+            "  📩 Reçu directement en message privé\n\n"
+            "🎁 <b>Rejoins via ce lien = PRO OFFERT :</b>\n"
+            "<code>{}</code>".format(ref_admin),
+            kb={"inline_keyboard": [
+                [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
+                [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
+                 {"text": "👑 Groupe PRO",  "url": VIP_GROUP_LINK}],
+            ]})
 
-        # Groupe PRO (VIP) — message 1 : sticker, message 2 : signal complet
+        # ── Groupe VIP → signal complet PRO ─────────────────────────
         tg_req("sendSticker", {"chat_id": str(VIP_CH), "sticker": stk})
         time.sleep(0.15)
         if chart_img:
@@ -2448,6 +2470,7 @@ def _scan_inner():
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
             save_signal(sig, sn)
+            _throttle_record(now_check)  # comptabiliser pour throttle
             log("SIG", "{} {} RR:1:{} Sc:{} G1:+${}".format(
                 clr(sig["name"], "b", "c"), sig["side"], sig["rr"], sc, sig["g1"]))
 
@@ -2710,24 +2733,60 @@ def handle_pay_confirm(uid,uname):
 #  CLAVIERS & COMMANDES
 # ══════════════════════════════════════════════════════
 def kb_main(pro=False): return {"inline_keyboard":[
-    [{"text":"📡 Signaux","callback_data":"signals"},{"text":"📈 Rapports","callback_data":"rapports"}],
-    [{"text":"👤 Mon Compte","callback_data":"account"},{"text":"🏆 Challenge IA","callback_data":"challenge"}],
+    [{"text":"📡 Mes Signaux","callback_data":"signals"},{"text":"📊 Mon Compte","callback_data":"account"}],
     [{"text":"💎 Devenir PRO","callback_data":"pay"} if not pro else {"text":"✅ PRO Actif","callback_data":"account"},{"text":"🤝 Parrainage","callback_data":"ref"}],
-    [{"text":"🏦 Broker","callback_data":"broker"},{"text":"📖 Guide","callback_data":"guide"}],
+    [{"text":"💸 Mes Gains","callback_data":"gains"},{"text":"📖 Guide ICT","callback_data":"guide"}],
+    [{"text":"📈 Rapports","callback_data":"rapports"},{"text":"🏦 Broker Exness","callback_data":"broker"}],
+    [{"text":"👑 Rejoindre groupe VIP","url": VIP_GROUP_LINK}] if pro else
+     [{"text":"📢 Rejoindre groupe FREE","url": FREE_GROUP_LINK}],
 ]}
 def kb_back(): return {"inline_keyboard":[[{"text":"◀️ Retour","callback_data":"start"}]]}
 
-def send_welcome(uid,uname):
-    db_register(uid,uname,tg_fn=tg_send)
-    p=is_pro(uid); ch=chal_get()
-    tg_sticker(uid,STK_W)
-    tg_send(uid,"🤖 <b>AlphaBot PRO v10 — Agent IA Adaptatif</b>\n"+"═"*22+"\n\n"
+def _group_invite_msg(pro=False):
+    """Retourne un message d'invitation au groupe selon le plan."""
+    if pro:
+        return (
+            "👑 <b>GROUPE VIP — Rejoins maintenant !</b>\n"
+            "═"*22+"\n\n"
+            "✅ Tu es PRO — accès au groupe VIP inclus !\n\n"
+            "📡 Dans le groupe tu reçois :\n"
+            "  • Tous les signaux en temps réel\n"
+            "  • Analyses ICT/SMC commentées\n"
+            "  • Même si le bot s'arrête, tu gardes les signaux\n\n"
+            "👇 <b>Clique pour rejoindre :</b>"
+        ), {"inline_keyboard": [[{"text":"👑 Rejoindre groupe VIP","url": VIP_GROUP_LINK}],
+                                 [{"text":"◀️ Retour","callback_data":"start"}]]}
+    else:
+        return (
+            "📢 <b>GROUPE FREE — Rejoins maintenant !</b>\n"
+            "═"*22+"\n\n"
+            "✅ Rejoins le groupe pour :\n"
+            "  • Voir les signaux même si le bot est offline\n"
+            "  • Rester informé des setups du marché\n"
+            "  • Communauté de traders AlphaBot\n\n"
+            "💎 Pour des signaux complets → /pay (PRO)\n\n"
+            "👇 <b>Clique pour rejoindre :</b>"
+        ), {"inline_keyboard": [[{"text":"📢 Rejoindre groupe FREE","url": FREE_GROUP_LINK}],
+                                 [{"text":"💎 Devenir PRO","callback_data":"pay"}],
+                                 [{"text":"◀️ Retour","callback_data":"start"}]]}
+
+def send_welcome(uid, uname):
+    db_register(uid, uname, tg_fn=tg_send)
+    p = is_pro(uid); ch = chal_get()
+    plan = get_plan(uid)
+    tg_sticker(uid, STK_W)
+    tg_send(uid,
+        "🤖 <b>AlphaBot PRO v17 — Agent IA Adaptatif</b>\n"+"═"*22+"\n\n"
         "📡 20 marchés : Forex · Or · BTC · Indices · Pétrole\n"
-        "🧠 ICT/SMC v2 + <b></b> ⚡\n"
+        "🧠 ICT/SMC · Tendance H1 · Entrée M5/M15\n"
         "🌍 Régime: <b>{}</b>  ·  Challenge: <b>{:.4f}$</b>\n\n"
         "✅ Plan: <b>{}</b>\n\nSélectionne une option ↓".format(
-            AI_REG.get("regime","?"),ch["balance"],get_plan(uid)),
+            AI_REG.get("regime","?"), ch["balance"], plan),
         kb=kb_main(p))
+    # Invitation groupe après le welcome (délai 2s)
+    time.sleep(2)
+    inv_msg, inv_kb = _group_invite_msg(p)
+    tg_send(uid, inv_msg, kb=inv_kb)
 
 def send_account(uid,uname,forced=None):
     plan=forced or get_plan(uid); _,exp,_=get_pro_info(uid)
@@ -3346,12 +3405,48 @@ def _scan_and_send_inner():
         [ADMIN_ID] if _admin_test_mode == "FREE" and ADMIN_ID not in free_users else [])
 
     for sig, key in sigs_raw:
+        # ── Throttle global : max 1/h, max 10/j, gap 30min ──────────
+        now_check = datetime.now(timezone.utc).replace(tzinfo=None)
+        ok_send, reason_throttle = _throttle_allowed(now_check)
+        if not ok_send:
+            log("INFO", clr("Signal {} ignoré — {}".format(sig["name"], reason_throttle), "yellow"))
+            continue
+
         msg_pro  = fmt_signal_pro(sig, news_lbl, sl)
         msg_free = fmt_signal_free(sig, news_lbl, sl)
+        sc       = sig.get("score", 0)
+        stk      = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
-        # ── Enregistrement signal (plus d'envoi dans le groupe) ──────
+        # ── Groupe FREE → signal simplifié + motivation ──────────────
+        tg_req("sendSticker", {"chat_id": str(CHANNEL_ID), "sticker": stk})
+        time.sleep(0.15)
+        tg_send(CHANNEL_ID, msg_free)
+        ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
+        time.sleep(1)
+        tg_send(CHANNEL_ID,
+            "💡 <b>Signal disponible — version complète en PRO</b>\n"
+            "━"*22+"\n\n"
+            "Ce signal inclut en PRO :\n"
+            "  🎯 TP · SL · Entrée exacte M5/M15\n"
+            "  📊 Score ICT + analyse complète\n"
+            "  📩 Reçu directement en message privé\n\n"
+            "🎁 <b>Rejoins via ce lien = PRO OFFERT :</b>\n"
+            "<code>{}</code>".format(ref_admin),
+            kb={"inline_keyboard": [
+                [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
+                [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
+                 {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
+            ]})
+
+        # ── Groupe VIP → signal complet ──────────────────────────────
+        tg_req("sendSticker", {"chat_id": str(VIP_CH), "sticker": stk})
+        time.sleep(0.15)
+        tg_send(VIP_CH, msg_pro)
+
+        # ── Enregistrement signal ────────────────────────────────────
         with _sent_lock: _sent.add(key)
         db_save_signal(sig, sn)
+        _throttle_record(now_check)
         sc_txt = clr(sig["side"], "green") if sig["side"] == "BUY" else clr(sig["side"], "red")
         log("SIGNAL", "{} {}  RR 1:{}  Score {}/{}  G1 +${}".format(
             clr(sig["name"], "bold", "white"), sc_txt,
@@ -4207,6 +4302,10 @@ def handle_activate(uid, target):
                 "⚡  inclus\n"
                 "🤖 Agent IA Binance inclus\n\n"
                 "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
+            # Inviter au groupe VIP immédiatement
+            time.sleep(1)
+            inv_msg, inv_kb = _group_invite_msg(pro=True)
+            tg_send(t_uid, inv_msg, kb=inv_kb)
             tg_send(uid,
                 "✅ FREE → PRO\n"
                 "{} <code>{}</code>  À VIE\n\n"
@@ -4236,6 +4335,9 @@ def _handle_activateall(uid):
                 "✅ Tous les marchés + analyses complètes\n"
                 "✅ Rapports quotidiens + hebdo\n"
                 "🚀 Bienvenue dans AlphaBot PRO !".format(PRO_LIMIT))
+            time.sleep(0.5)
+            inv_msg, inv_kb = _group_invite_msg(pro=True)
+            tg_send(fuid, inv_msg, kb=inv_kb)
             ok += 1; time.sleep(0.07)
         except: fail += 1
     tg_sticker(uid, STK_CROWN)
@@ -5966,6 +6068,12 @@ def dispatch_cb(cb):
     elif data == "ref":     threading.Thread(target=send_affilie, args=(uid, uname), daemon=True).start()
     elif data == "broker":  send_broker(uid)
     elif data == "guide":   threading.Thread(target=send_guide, args=(uid,), daemon=True).start()
+    elif data == "gains":   threading.Thread(target=send_gains, args=(uid,), daemon=True).start()
+    elif data == "groupe":
+        # Envoyer le lien groupe selon le plan
+        p = is_pro(uid)
+        inv_msg, inv_kb = _group_invite_msg(p)
+        tg_send(uid, inv_msg, kb=inv_kb)
 
     # ── Paiement ─────────────────────────────────────────────
     elif data == "pay_submitted":
@@ -6744,4 +6852,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
