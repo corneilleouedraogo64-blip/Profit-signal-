@@ -1503,6 +1503,19 @@ def agent_analyze(m, score_min, news_ok, q):
         q.put({"name": m["name"], "cat": m["cat"], "found": False,
                "reason": str(ex)[:40], "improv": False})
 
+# ══════════════════════════════════════════════════════════════════
+#  BINANCE IA (Crypto futures)
+# ══════════════════════════════════════════════════════════════════
+AI_C   = defaultdict(lambda: defaultdict(deque))
+AI_P   = {}
+AI_PRS = []
+AI_REG = {"regime":"RANGING","min_score":72,"risk_mult":1.0,"lev_cap":15,"label":"Init"}
+AI_OT  = {}
+AI_TC  = 0
+AI_CD  = {}
+_ai_lk = threading.Lock()
+EXCH   = {}; EXCH_TS = 0
+
 def b_get(ep, p=None):
     try:
         url="{}{}?{}".format(BINANCE_BASE,ep,urllib.parse.urlencode(p or {}))
