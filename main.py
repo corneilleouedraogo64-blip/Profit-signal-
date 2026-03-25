@@ -11,7 +11,7 @@ AlphaBot PRO v17 — Agent IA Adaptatif
 • Challenge IA 5$→500$ (Binance simulation)
 • pip install requests
 """
-import json, ssl, time, sqlite3, threading, math, random, logging
+import json, ssl, time, threading, math, random, logging
 import urllib.request, urllib.parse, urllib.error, os
 from datetime import datetime, timedelta, timezone
 from queue import Queue, Empty
@@ -38,7 +38,8 @@ VIP_GROUP_LINK  = os.getenv("VIP_GROUP_LINK",  "https://t.me/+alphabotvip")    #
 PRO_PRICE  = 10;  REF_TARGET = 30;  REF_MONTHS = 3
 FREE_LIMIT = 3;   PRO_LIMIT  = 10;  NB_AGENTS  = 20
 TRIAL_DAYS = 3;   SCAN_SEC   = 60;  DATA_MAX_AGE = 30
-DAILY_HOUR = 20;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
+DAILY_HOUR = 22;  WEEKLY_DAY = 6;   WEEKLY_HOUR = 21
+SIGNAL_CUTOFF_HOUR = 22   # Aucun signal envoyé à partir de 22h00 UTC
 FEE_TAKER  = 0.0004
 CHALLENGE_START = float(os.getenv("CHALLENGE_START", "5.0"))
 MAX_OPEN   = 3;  COOLDOWN_MIN = 25
@@ -408,292 +409,58 @@ def tg_send_sticker(chat_id, sticker_id): tg_req("sendSticker", {"chat_id": str(
 def tg_sticker(cid, sid): tg_req("sendSticker",{"chat_id":str(cid),"sticker":sid})
 
 # ══════════════════════════════════════════════════════
-#  BASE DE DONNÉES
+#  BASE DE DONNÉES — PostgreSQL / SQLite (via alphabot_pg)
 # ══════════════════════════════════════════════════════
-_dbl = threading.RLock()  # RLock: réentrant, évite deadlock db_register→db_pro
-def _conn():
-    c = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=NORMAL")
-    return c
+# Toute la logique DB (connexion, tables, helpers, fonctions métier)
+# est gérée par alphabot_pg.py qui supporte automatiquement :
+#   • PostgreSQL (Render persistant) si DATABASE_URL est défini
+#   • SQLite local en fallback (tests / dev)
+# ─────────────────────────────────────────────────────
+import sys as _sys, os as _os
+_pg_path = _os.path.dirname(_os.path.abspath(__file__))
+if _pg_path not in _sys.path:
+    _sys.path.insert(0, _pg_path)
 
-def db_init():
-    con = _conn(); cur = con.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users(
-        user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '',
-        plan TEXT DEFAULT 'FREE', ref_by INTEGER DEFAULT 0,
-        ref_count INTEGER DEFAULT 0, joined TEXT DEFAULT '',
-        pro_expires TEXT, pro_source TEXT, trial_used INTEGER DEFAULT 0,
-        last_seen TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS payments(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-        amount REAL, tx_hash TEXT, status TEXT DEFAULT 'PENDING', created TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS signals(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, side TEXT,
-        entry REAL, tp REAL, sl REAL, rr REAL, score INTEGER,
-        mode TEXT DEFAULT 'NORMAL', session TEXT DEFAULT '', g001 REAL DEFAULT 0,
-        g1 REAL DEFAULT 0, l001 REAL DEFAULT 0, l1 REAL DEFAULT 0, sent_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS sig_counts(
-        user_id INTEGER, date_str TEXT, count INTEGER DEFAULT 0,
-        PRIMARY KEY(user_id, date_str))""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS sig_track(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, sig_id INTEGER,
-        pair TEXT, entry REAL, tp REAL, sl REAL, side TEXT,
-        status TEXT DEFAULT 'OPEN', created TEXT, closed_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS daily_rep(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, rep_date TEXT,
-        sig_count INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
-        g001 REAL DEFAULT 0, g1 REAL DEFAULT 0, created TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS weekly_rep(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, week_start TEXT,
-        sig_count INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
-        g1 REAL DEFAULT 0, created TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS ai_mem(
-        key TEXT PRIMARY KEY, wins INTEGER DEFAULT 0,
-        losses INTEGER DEFAULT 0, pnl REAL DEFAULT 0, updated TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS challenge(
-        id INTEGER PRIMARY KEY, balance REAL DEFAULT 5, start_bal REAL DEFAULT 5,
-        today_pnl REAL DEFAULT 0, today_w INTEGER DEFAULT 0, today_l INTEGER DEFAULT 0,
-        best_rr REAL DEFAULT 0, peak REAL DEFAULT 5, am_cycle INTEGER DEFAULT 0,
-        w_streak INTEGER DEFAULT 0, l_streak INTEGER DEFAULT 0,
-        day_open REAL DEFAULT 5, day_start TEXT DEFAULT '')""")
-    cur.execute("INSERT OR IGNORE INTO challenge(id,balance,start_bal,peak,day_open) VALUES(1,?,?,?,?)",
-        (CHALLENGE_START,)*4)
-    con.commit(); con.close()
-    log("INFO", clr("DB v10 OK","b","g"))
+from alphabot_pg import (
+    # Connexion & lock
+    _conn, _dbl, _db_lock, _USE_PG,
+    # Helpers bas niveau
+    db_one, db_all, db_run,
+    # Init DB
+    db_init,
+    # Gestion utilisateurs
+    db_register, db_pro, db_free,
+    is_pro, get_plan, get_refs, get_pro_info,
+    pro_users, free_users, all_users, find_user,
+    # Compteurs signaux
+    count_today, count_incr,
+    db_count_increment,          # alias rétrocompat
+    # Expiration PRO
+    check_expiry,
+    # Signaux & tracking
+    save_signal, open_signals, close_track,
+    # Statistiques
+    daily_stats, weekly_stats, global_stats,
+    rep_sent, mark_rep,
+    # Paiements
+    save_pay, pending_pays,
+    db_save_payment, db_pending_payments,  # aliases
+    # Challenge
+    chal_get, chal_save,
+    # Mémoire IA
+    mem_query, mem_record, best_setups, worst_setups,
+    # Aliases rétrocompatibilité v17
+    db_get_pro_info, db_get_refs, db_global_stats,
+    db_daily_stats, db_weekly_stats,
+    db_get_pro_users, db_get_free_users,
+    db_downgrade_pro, db_activate_pro,
+    db_find_by_username, db_count_today,
+    db_get_inactive_users, inactive_users,
+    # Migration CLI
+    migrate_sqlite_to_pg,
+)
 
-# ── Helpers DB ─────────────────────────────────────────
-def db_one(sql, args=()):
-    con=_conn(); cur=con.cursor(); cur.execute(sql,args); r=cur.fetchone(); con.close(); return r
-
-def db_all(sql, args=()):
-    con=_conn(); cur=con.cursor(); cur.execute(sql,args); r=cur.fetchall(); con.close(); return r
-
-def db_run(sql, args=()):
-    con=_conn(); cur=con.cursor()
-    with _dbl: cur.execute(sql,args); con.commit()
-    con.close()
-
-def db_register(uid, uname, ref_by=0, tg_fn=None):
-    con=_conn(); cur=con.cursor()
-    with _dbl:
-        cur.execute("SELECT user_id FROM users WHERE user_id=?",(uid,))
-        if not cur.fetchone():
-            now=datetime.now().strftime("%Y-%m-%d")
-            cur.execute("INSERT INTO users(user_id,username,plan,ref_by,joined) VALUES(?,?,?,?,?)",(uid,uname or "","FREE",ref_by,now))
-            con.commit()
-            # ── Auto-PRO si rejoint via lien admin ───────────────────
-            if ref_by == ADMIN_ID and uid != ADMIN_ID:
-                con.close()
-                db_pro(uid, "ADMIN_REF", days=30)  # 30 jours PRO offerts
-                if tg_fn:
-                    tg_fn(uid,
-                        "🎁 <b>PRO OFFERT — Bienvenue !</b>\n"
-                        "═"*22+"\n\n"
-                        "✅ Tu as rejoint via le lien officiel AlphaBot.\n"
-                        "<b>30 jours PRO offerts !</b>\n\n"
-                        "📡 Tu reçois maintenant :\n"
-                        "  🎯 Signaux complets M5/M15\n"
-                        "  📊 TP · SL · Score ICT\n"
-                        "  📩 Directement en DM\n\n"
-                        "👑 Rejoins le groupe VIP :",
-                        kb={"inline_keyboard": [
-                            [{"text": "👑 Rejoindre groupe VIP", "url": VIP_GROUP_LINK}],
-                            [{"text": "🤖 Démarrer le bot", "callback_data": "start"}],
-                        ]})
-                    tg_fn(ADMIN_ID, "🎁 Auto-PRO : @{} <code>{}</code> (via ton lien)".format(uname or "?", uid))
-                return
-            if ref_by and ref_by!=uid:
-                cur.execute("UPDATE users SET ref_count=ref_count+1 WHERE user_id=?",(ref_by,))
-                cur.execute("SELECT ref_count FROM users WHERE user_id=?",(ref_by,))
-                row=cur.fetchone(); con.commit()
-                if row and tg_fn:
-                    count=row[0]
-                    tg_fn(ref_by,"🎉 <b>Nouveau filleul!</b>\n@{} a rejoint.\n👥 <b>{}/{}</b>".format(uname or "?",count,REF_TARGET))
-                    if count>=REF_TARGET:
-                        con.close(); db_pro(ref_by,"PARRAINAGE",days=REF_MONTHS*30)
-                        tg_fn(ref_by,"🏆 {} filleuls → {} MOIS PRO!".format(REF_TARGET,REF_MONTHS)); return
-            # Essai PRO
-            cur.execute("SELECT trial_used FROM users WHERE user_id=?",(uid,))
-            row=cur.fetchone()
-            if row and not row[0]:
-                con.close(); db_pro(uid,"TRIAL_{}J".format(TRIAL_DAYS),days=TRIAL_DAYS)
-                if tg_fn: tg_fn(uid,"🎁 <b>Essai PRO {} jours!</b>".format(TRIAL_DAYS))
-                return
-        else:
-            if uname:
-                cur.execute("UPDATE users SET username=?,last_seen=? WHERE user_id=?",(uname,datetime.now().isoformat(),uid))
-                con.commit()
-    con.close()
-
-def db_pro(uid, src="PAY", days=None):
-    con=_conn(); cur=con.cursor()
-    exp=(datetime.now()+timedelta(days=days)).strftime("%Y-%m-%d") if days else None
-    with _dbl:
-        cur.execute("UPDATE users SET plan='PRO',pro_expires=?,pro_source=? WHERE user_id=?",(exp,src,uid))
-        cur.execute("UPDATE payments SET status='CONFIRMED' WHERE user_id=? AND status='PENDING'",(uid,))
-        con.commit()
-    con.close()
-
-def db_free(uid):
-    db_run("UPDATE users SET plan='FREE',pro_expires=NULL,pro_source=NULL WHERE user_id=?",(uid,))
-
-def is_pro(uid):
-    r=db_one("SELECT plan FROM users WHERE user_id=?",(uid,))
-    return r is not None and r[0] in ("PRO","VIP")
-
-def get_plan(uid):
-    r=db_one("SELECT plan FROM users WHERE user_id=?",(uid,)); return r[0] if r else "FREE"
-
-def get_refs(uid):
-    r=db_one("SELECT ref_count FROM users WHERE user_id=?",(uid,)); return r[0] if r else 0
-
-def get_pro_info(uid):
-    r=db_one("SELECT plan,pro_expires,pro_source FROM users WHERE user_id=?",(uid,))
-    return (r[0],r[1],r[2]) if r else ("FREE",None,None)
-
-def pro_users(): return [r[0] for r in db_all("SELECT user_id FROM users WHERE plan IN ('PRO','VIP')")]
-def free_users(): return [r[0] for r in db_all("SELECT user_id FROM users WHERE plan='FREE'")]
-def all_users(): return [r[0] for r in db_all("SELECT user_id FROM users")]
-
-def find_user(uname):
-    uname=uname.lstrip("@").lower()
-    for uid,un in db_all("SELECT user_id,username FROM users"):
-        if un and un.lower()==uname: return uid
-    return None
-
-def count_today(uid):
-    ds=datetime.now().strftime("%Y-%m-%d")
-    r=db_one("SELECT count FROM sig_counts WHERE user_id=? AND date_str=?",(uid,ds))
-    return r[0] if r else 0
-
-def count_incr(uid):
-    ds=datetime.now().strftime("%Y-%m-%d"); con=_conn(); cur=con.cursor()
-    with _dbl:
-        r=cur.execute("SELECT count FROM sig_counts WHERE user_id=? AND date_str=?",(uid,ds)).fetchone()
-        if r: cur.execute("UPDATE sig_counts SET count=count+1 WHERE user_id=? AND date_str=?",(uid,ds))
-        else: cur.execute("INSERT INTO sig_counts(user_id,date_str,count) VALUES(?,?,1)",(uid,ds))
-        con.commit()
-    con.close()
-
-def check_expiry():
-    today=datetime.now().strftime("%Y-%m-%d")
-    expired=db_all("SELECT user_id,username FROM users WHERE plan='PRO' AND pro_expires IS NOT NULL AND pro_expires<?",(today,))
-    for uid,_ in expired: db_run("UPDATE users SET plan='FREE',pro_expires=NULL WHERE user_id=?",(uid,))
-    return expired
-
-def save_signal(s, sn):
-    con=_conn(); cur=con.cursor()
-    with _dbl:
-        cur.execute("INSERT INTO signals(pair,side,entry,tp,sl,rr,score,mode,session,g001,g1,l001,l1,sent_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (s["name"],s["side"],s["entry"],s["tp"],s["sl"],s["rr"],s["score"],
-             s.get("mode","NORMAL"),sn,s.get("g001",0),s.get("g1",0),s.get("l001",0),s.get("l1",0),
-             datetime.now().isoformat()))
-        lid=cur.lastrowid
-        cur.execute("INSERT OR IGNORE INTO sig_track(sig_id,pair,entry,tp,sl,side,created) VALUES(?,?,?,?,?,?,?)",
-            (lid,s["name"],s["entry"],s["tp"],s["sl"],s["side"],datetime.now().isoformat()))
-        con.commit()
-    con.close()
-
-def daily_stats(ds=None):
-    ds = ds or datetime.now().strftime("%Y-%m-%d")
-    con = _conn(); cur = con.cursor()
-    # Récupère les signaux du jour avec leur résultat réel depuis sig_track
-    cur.execute("""
-        SELECT s.pair, s.side, s.rr, s.g001, s.g1, s.l001, s.l1, s.session, s.mode,
-               COALESCE(st.status, 'OPEN') as result
-        FROM signals s
-        LEFT JOIN sig_track st ON st.sig_id = s.id
-        WHERE s.sent_at LIKE ?
-        ORDER BY s.sent_at
-    """, (ds + "%",))
-    rows = cur.fetchall(); con.close()
-    # Compter uniquement les vrais TP confirmés (pas estimés)
-    confirmed_tp   = [r for r in rows if r[9] == "TP"]
-    confirmed_sl   = [r for r in rows if r[9] == "SL"]
-    open_signals   = [r for r in rows if r[9] == "OPEN"]
-    # Gains réels = uniquement les TP confirmés ; gains estimés = signaux ouverts
-    real_g1   = round(sum(r[4] for r in confirmed_tp), 2)
-    real_g001 = round(sum(r[3] for r in confirmed_tp), 2)
-    pot_g1    = round(sum(r[4] for r in open_signals), 2)   # potentiel si TP
-    pot_g001  = round(sum(r[3] for r in open_signals), 2)
-    return {
-        "date":   ds,
-        "n":      len(rows),
-        "wins":   len(confirmed_tp),
-        "losses": len(confirmed_sl),
-        "open":   len(open_signals),
-        "g001":   real_g001,
-        "g1":     real_g1,
-        "pot_g001": pot_g001,
-        "pot_g1":   pot_g1,
-        "rows":   rows,
-    }
-
-def weekly_stats():
-    ws=(datetime.now()-timedelta(days=7)).strftime("%Y-%m-%d")
-    rows=db_all("SELECT pair,side,rr,g001,g1 FROM signals WHERE sent_at>=? ORDER BY sent_at",(ws+" 00:00",))
-    w=sum(1 for r in rows if r[2]>=2.5)
-    return {"ws":ws,"n":len(rows),"wins":w,"g001":round(sum(r[3] for r in rows),2),"g1":round(sum(r[4] for r in rows),2)}
-
-def global_stats():
-    total=db_one("SELECT COUNT(*) FROM users")[0]; pro=db_one("SELECT COUNT(*) FROM users WHERE plan='PRO'")[0]
-    sigs=db_one("SELECT COUNT(*) FROM signals")[0]; pays=db_one("SELECT COUNT(*) FROM payments WHERE status='CONFIRMED'")[0]
-    g1d=db_one("SELECT COALESCE(SUM(g1),0) FROM signals WHERE sent_at LIKE ?",(datetime.now().strftime("%Y-%m-%d")+"%",))[0]
-    return total,pro,sigs,pays,round(g1d,2)
-
-def rep_sent(ds, tbl="daily_rep", col="rep_date"):
-    r=db_one("SELECT 1 FROM {} WHERE {}=?".format(tbl,col),(ds,)); return r is not None
-
-def mark_rep(stats, tbl="daily_rep"):
-    if tbl=="daily_rep":
-        db_run("INSERT INTO daily_rep(rep_date,sig_count,wins,g001,g1,created) VALUES(?,?,?,?,?,?)",
-            (stats["date"],stats["n"],stats["wins"],stats["g001"],stats["g1"],datetime.now().isoformat()))
-    else:
-        db_run("INSERT INTO weekly_rep(week_start,sig_count,wins,g1,created) VALUES(?,?,?,?,?)",
-            (stats["ws"],stats["n"],stats["wins"],stats["g1"],datetime.now().isoformat()))
-
-def save_pay(uid, tx): db_run("INSERT INTO payments(user_id,amount,tx_hash,status,created) VALUES(?,?,?,?,?)",(uid,PRO_PRICE,tx,"PENDING",datetime.now().isoformat()))
-def pending_pays(): return db_all("SELECT p.id,p.user_id,u.username,p.tx_hash,p.created FROM payments p LEFT JOIN users u ON p.user_id=u.user_id WHERE p.status='PENDING' ORDER BY p.created DESC LIMIT 10")
-
-def open_signals():
-    try: return db_all("SELECT id,pair,entry,tp,sl,side,created FROM sig_track WHERE status='OPEN'")
-    except: return []
-
-def close_track(tid, status): db_run("UPDATE sig_track SET status=?,closed_at=? WHERE id=?",(status,datetime.now().isoformat(),tid))
-
-def inactive_users(days=3):
-    cutoff=(datetime.now()-timedelta(days=days)).isoformat()
-    return db_all("SELECT user_id,username FROM users WHERE plan='FREE' AND (last_seen<? OR last_seen IS NULL) AND joined<?",(cutoff,cutoff))
-
-def chal_get():
-    _def = {"balance":CHALLENGE_START,"start_bal":CHALLENGE_START,"today_pnl":0,
-            "today_w":0,"today_l":0,"best_rr":0,"peak":CHALLENGE_START,
-            "am_cycle":0,"w_streak":0,"l_streak":0,"day_open":CHALLENGE_START,"day_start":""}
-    try:
-        r = db_one("SELECT balance,start_bal,today_pnl,today_w,today_l,best_rr,"
-                   "peak,am_cycle,w_streak,l_streak,day_open,day_start FROM challenge WHERE id=1")
-    except Exception:
-        return _def
-    if not r:
-        return _def
-    k = ["balance","start_bal","today_pnl","today_w","today_l","best_rr",
-         "peak","am_cycle","w_streak","l_streak","day_open","day_start"]
-    return dict(zip(k, r))
-
-def chal_save(c):
-    today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if c.get("day_start")!=today:
-        c["day_open"]=c["balance"]; c["today_pnl"]=0; c["today_w"]=0; c["today_l"]=0; c["day_start"]=today
-    db_run("UPDATE challenge SET balance=?,today_pnl=?,today_w=?,today_l=?,best_rr=?,peak=?,am_cycle=?,w_streak=?,l_streak=?,day_open=?,day_start=? WHERE id=1",
-        (c["balance"],c["today_pnl"],c["today_w"],c["today_l"],c["best_rr"],c["peak"],c["am_cycle"],c["w_streak"],c["l_streak"],c["day_open"],c.get("day_start",today)))
-
-def mem_query(key):
-    r=db_one("SELECT wins,losses,pnl FROM ai_mem WHERE key=?",(key,)); return r or (0,0,0.0)
-
-def mem_record(key, result, pnl):
-    w,l,p=mem_query(key)
-    w+=(1 if result=="WIN" else 0); l+=(0 if result=="WIN" else 1); p=round(p+pnl,4)
-    db_run("INSERT OR REPLACE INTO ai_mem(key,wins,losses,pnl,updated) VALUES(?,?,?,?,?)",(key,w,l,p,datetime.now().isoformat()))
+log("INFO", clr("DB v10 OK (backend: {})".format("PostgreSQL" if _USE_PG else "SQLite"), "b", "g"))
 
 def setup_key(sig):
     """
@@ -703,7 +470,6 @@ def setup_key(sig):
     """
     sn,_,_,_=get_session()
     badges_raw = sig.get("badges","")
-    # Extraire les confirmations clés
     tags=[]
     if "OTE" in badges_raw:   tags.append("OTE")
     if "FVG" in badges_raw:   tags.append("FVG")
@@ -725,34 +491,12 @@ def mem_adj_score(sig_key, sc):
     """
     w,l,pnl=mem_query(sig_key)
     total=w+l
-    if total < 5: return sc, ""   # pas assez d'historique
+    if total < 5: return sc, ""
     wr=w/total
     if wr > 0.70:   return min(sc+8, 115),  "🧠 WR {}%✓".format(int(wr*100))
     if wr > 0.50:   return min(sc+3, 115),  ""
     if wr > 0.35:   return max(sc-8, 0),    ""
-    return max(sc-15, 0), ""   # setup perdant → pénalité forte
-
-def best_setups(n=5):
-    """Top N setups par winrate (minimum 5 trades)."""
-    data=db_all("SELECT key,wins,losses,pnl FROM ai_mem")
-    res=[]
-    for k,w,l,p in data:
-        t=w+l
-        if t<5: continue
-        res.append({"key":k,"wins":w,"losses":l,"total":t,"wr":round(w/t*100),"pnl":round(p,2)})
-    res.sort(key=lambda x:(-x["wr"],-x["total"]))
-    return res[:n]
-
-def worst_setups(n=5):
-    """Top N setups les moins performants."""
-    data=db_all("SELECT key,wins,losses,pnl FROM ai_mem")
-    res=[]
-    for k,w,l,p in data:
-        t=w+l
-        if t<5: continue
-        res.append({"key":k,"wins":w,"losses":l,"total":t,"wr":round(w/t*100),"pnl":round(p,2)})
-    res.sort(key=lambda x:(x["wr"],-x["total"]))
-    return res[:n]
+    return max(sc-15, 0), ""
 
 # ══════════════════════════════════════════════════════
 #  SESSIONS
@@ -806,6 +550,63 @@ def swings(c,n=5):
         if c[i]["h"]==max(x["h"] for x in w): H.append((i,c[i]["h"]))
         if c[i]["l"]==min(x["l"] for x in w): L.append((i,c[i]["l"]))
     return H,L
+
+
+def sl_from_structure(candles, bias, atr_val, entry, pip, spread_pips=0, lookback=40):
+    """
+    Place le SL sur le dernier swing significatif de la structure M15.
+    ─────────────────────────────────────────────────────────────────
+    BUY  → SL = dernier Swing Low significatif  - buffer ATR
+    SELL → SL = dernier Swing High significatif + buffer ATR
+
+    Buffer = ATR * 0.20  (évite les faux déclenchements)
+    Fallback : si aucun swing trouvé → ATR * 1.2 depuis entry
+
+    Contraintes :
+    - SL ne peut pas être à plus de ATR * 4 de l'entry (évite SL absurdes)
+    - SL ne peut pas être à moins de ATR * 0.5 (trop serré = stop hunt)
+    - Pour BUY  : SL doit être SOUS l'entry
+    - Pour SELL : SL doit être AU-DESSUS de l'entry
+    """
+    recent = candles[-lookback:] if len(candles) >= lookback else candles
+    buf    = atr_val * 0.20
+    sp_val = spread_pips * pip
+    max_sl = atr_val * 4.0
+    min_sl = atr_val * 0.5
+
+    H, L = swings(recent, n=3)
+
+    if bias == "BULLISH":
+        # Chercher le dernier swing low SOUS l'entry
+        candidates = [lv for _, lv in reversed(L) if lv < entry]
+        if candidates:
+            # Prendre le swing low le plus proche de l'entry (le plus haut)
+            best_low = max(candidates)
+            sl = best_low - buf - sp_val
+        else:
+            # Fallback : ATR * 1.2 sous l'entry
+            sl = entry - atr_val * 1.2 - sp_val
+        # Contraintes
+        dist = entry - sl
+        if dist > max_sl: sl = entry - max_sl
+        if dist < min_sl: sl = entry - min_sl
+        return sl
+
+    else:  # BEARISH / SELL
+        # Chercher le dernier swing high AU-DESSUS de l'entry
+        candidates = [hv for _, hv in reversed(H) if hv > entry]
+        if candidates:
+            # Prendre le swing high le plus proche de l'entry (le plus bas)
+            best_high = min(candidates)
+            sl = best_high + buf + sp_val
+        else:
+            # Fallback : ATR * 1.2 au-dessus de l'entry
+            sl = entry + atr_val * 1.2 + sp_val
+        # Contraintes
+        dist = sl - entry
+        if dist > max_sl: sl = entry + max_sl
+        if dist < min_sl: sl = entry + min_sl
+        return sl
 
 def eqh_eql(c,tol=0.0003):
     hi=[x["h"] for x in c[-40:]]; lo=[x["l"] for x in c[-40:]]
@@ -1435,8 +1236,7 @@ def agent_analyze(m, score_min, news_ok, q):
         if bbs and sc >= s_min and (news_ok or sc >= s_min + 5):
             bb   = bbs[0]
             e    = lp
-            buf  = a * 0.12
-            sp_p = sp * m["pip"]
+            sp_p = sp * m["pip"]   # spread en prix (utilisé pour TP net)
             eq_h, eq_l = eqh_eql(m15)
 
             # Construire les badges finaux (ordre logique : HTF → LTF)
@@ -1465,7 +1265,10 @@ def agent_analyze(m, score_min, news_ok, q):
             pip = m["pip"]
 
             if b == "BULLISH":
-                sl_p = bb["bottom"] - buf - sp_p
+                # SL sur le dernier swing low de structure M15 (ICT)
+                sl_p = sl_from_structure(m15, "BULLISH", a, e, pip,
+                                         spread_pips=sp, lookback=40)
+                sl_p = f(sl_p)
                 risk = e - sl_p
                 if risk > 0 and risk <= a * 12:
                     tp_eq = (eq_h * 0.9995) if (eq_h and e < eq_h < e + risk * 6) else None
@@ -1492,7 +1295,10 @@ def agent_analyze(m, score_min, news_ok, q):
                         }
 
             else:  # BEARISH
-                sl_p = bb["top"] + buf + sp_p
+                # SL sur le dernier swing high de structure M15 (ICT)
+                sl_p = sl_from_structure(m15, "BEARISH", a, e, pip,
+                                         spread_pips=sp, lookback=40)
+                sl_p = f(sl_p)
                 risk = sl_p - e
                 if risk > 0 and risk <= a * 12:
                     tp_eq = (eq_l * 1.0005) if (eq_l and e - risk * 6 < eq_l < e) else None
@@ -2413,8 +2219,13 @@ def _scan_inner():
     ).format(FREE_LIMIT, BROKER_LINK, PRO_PRICE)
 
     for sig, key in sigs:
-        # ── Throttle global : max 3/h, max 6/j, gap 15min ──────────
+        # ── Blocage signaux après 22h00 UTC ─────────────────────────
         now_check = datetime.now(timezone.utc).replace(tzinfo=None)
+        if now_check.hour >= SIGNAL_CUTOFF_HOUR:
+            log("INFO", clr("Signal {} bloqué — après 22h00 UTC".format(sig["name"]), "yellow"))
+            continue
+
+        # ── Throttle global : max 3/h, max 6/j, gap 15min ──────────
         ok_send, reason_throttle = _throttle_allowed(now_check)
         if not ok_send:
             log("INFO", clr("Signal {} ignoré — {}".format(sig["name"], reason_throttle), "yellow"))
@@ -2423,8 +2234,8 @@ def _scan_inner():
         sc  = sig.get("score", 0)
         stk = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
-        msg_p = fmt_pro(sig, news_lbl, sl_l)
-        msg_f = fmt_free(sig, news_lbl, sl_l)
+        msg_p       = fmt_pro(sig, news_lbl, sl_l)
+        msg_teasing = fmt_signal_teasing(sig)
 
         # ── Image du signal ──────────────────────────────────────────
         chart_img = None
@@ -2434,23 +2245,17 @@ def _scan_inner():
             chart_img = generate_signal_chart(sig, m15_c)
         except: pass
 
-        # ── Groupe FREE → 1 seul message : signal + promo ───────────
+        # ── Groupe FREE → teasing uniquement (aucun niveau) ─────────
         ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
-        promo_footer = (
-            "\n━"*1+"━"*21+"\n"
-            "💎 <b>Version complète (TP/SL/Score) → PRO</b>\n"
-            "🎁 Rejoins via : <code>{}</code>\n"
-            "📸 Partage à 10 amis avec capture = PRO offert"
-        ).format(ref_admin)
-        msg_free_with_promo = msg_f + promo_footer
         if chart_img:
-            r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_free_with_promo[:1024])
+            r = tg_send_photo(CHANNEL_ID, chart_img, caption=msg_teasing[:1024])
         else:
-            r = tg_send(CHANNEL_ID, msg_free_with_promo,
+            r = tg_send(CHANNEL_ID, msg_teasing,
                         kb={"inline_keyboard": [
-                            [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
-                            [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
-                             {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
+                            [{"text": "💵 Payer 10$/mois",      "url": ref_admin}],
+                            [{"text": "🤝 Parrainer 10 amis",   "url": ref_admin}],
+                            [{"text": "📢 Partager ce groupe",   "url": FREE_GROUP_LINK},
+                             {"text": "👑 Groupe VIP",           "url": VIP_GROUP_LINK}],
                         ]})
 
         # ── Groupe VIP → 1 seul message : signal PRO complet ────────
@@ -2462,7 +2267,7 @@ def _scan_inner():
         if r.get("ok"):
             with _sent_lk: _sent.add(key)
             save_signal(sig, sn)
-            _throttle_record(now_check)  # comptabiliser pour throttle
+            _throttle_record(now_check)
             log("SIG", "{} {} RR:1:{} Sc:{} G1:+${}".format(
                 clr(sig["name"], "b", "c"), sig["side"], sig["rr"], sc, sig["g1"]))
 
@@ -2475,7 +2280,7 @@ def _scan_inner():
                     tg_send(uid, msg_p)
                     count_incr(uid)
                 elif c < FREE_LIMIT:
-                    tg_send(uid, msg_f)
+                    tg_send(uid, msg_teasing)
                     count_incr(uid)
                 # Au-delà de la limite → silence total (pas de message)
                 time.sleep(0.06)
@@ -2490,8 +2295,7 @@ def _scan_inner():
                 "🔍 Scan {} — Aucun setup propre ce cycle.\n"
                 "Marchés actifs mais conditions insuffisantes (score < 85 ou liquidité absente).\n"
                 "Prochaine analyse dans {}s.".format(scan_t, SCAN_SEC))
-    # ── Rapport soir 20h UTC — UNE SEULE FOIS ───────────────────────
-    # Déclenché uniquement à l'heure exacte (pas >= pour éviter toutes les minutes)
+    # ── Rapport soir 22h UTC — UNE SEULE FOIS ───────────────────────
     if int(hs) == DAILY_HOUR and _last_d != ds and not rep_sent(ds):
         st = daily_stats(ds)
         if st["n"] > 0:
@@ -2500,16 +2304,20 @@ def _scan_inner():
             if d_pro:
                 ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
                 free_footer = (
-                    "\n━"*1+"━"*21+"\n"
-                    "💎 Passe en PRO pour les signaux complets\n"
-                    "🎁 <code>{}</code>\n"
-                    "📸 Partage à 10 amis avec preuve = PRO offert"
-                ).format(ref_admin)
-                # Groupe FREE : rapport + promo
+                    "\n━" + "━"*21 + "\n"
+                    "📡 <b>{} signaux envoyés aujourd'hui aux membres PRO/VIP</b>\n\n"
+                    "👑 <b>Rejoins la version PRO — 3 options :</b>\n\n"
+                    "1️⃣ 💵 Payer 10$/mois → /pay\n"
+                    "2️⃣ 🤝 Parrainer 10 personnes → 7j PRO gratuits\n"
+                    "3️⃣ 📢 Partager ce groupe (10–30 personnes + capture à @leaderOdg)\n\n"
+                    "🔗 Lien à partager : <code>{}</code>"
+                ).format(st["n"], FREE_GROUP_LINK)
+                # Groupe FREE : rapport + CTA
                 tg_send(CHANNEL_ID, d_free + free_footer,
                         kb={"inline_keyboard": [
-                            [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
-                            [{"text": "👑 Groupe VIP", "url": VIP_GROUP_LINK}],
+                            [{"text": "💵 Payer 10$/mois",    "url": ref_admin}],
+                            [{"text": "🤝 Parrainer 10 amis", "url": ref_admin}],
+                            [{"text": "👑 Groupe VIP",        "url": VIP_GROUP_LINK}],
                         ]})
                 # Groupe VIP : rapport complet PRO
                 tg_send(VIP_CH, d_pro)
@@ -3398,31 +3206,31 @@ def _scan_and_send_inner():
         [ADMIN_ID] if _admin_test_mode == "FREE" and ADMIN_ID not in free_users else [])
 
     for sig, key in sigs_raw:
-        # ── Throttle global : max 1/h, max 10/j, gap 30min ──────────
+        # ── Blocage signaux après 22h00 UTC ─────────────────────────
         now_check = datetime.now(timezone.utc).replace(tzinfo=None)
+        if now_check.hour >= SIGNAL_CUTOFF_HOUR:
+            log("INFO", clr("Signal {} bloqué — après 22h00 UTC".format(sig["name"]), "yellow"))
+            continue
+
+        # ── Throttle global : max 1/h, max 10/j, gap 30min ──────────
         ok_send, reason_throttle = _throttle_allowed(now_check)
         if not ok_send:
             log("INFO", clr("Signal {} ignoré — {}".format(sig["name"], reason_throttle), "yellow"))
             continue
 
-        msg_pro  = fmt_signal_pro(sig, news_lbl, sl)
-        msg_free = fmt_signal_free(sig, news_lbl, sl)
-        sc       = sig.get("score", 0)
-        stk      = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
+        msg_pro    = fmt_signal_pro(sig, news_lbl, sl)
+        msg_teasing = fmt_signal_teasing(sig)
+        sc         = sig.get("score", 0)
+        stk        = STK_CROWN if sc >= 90 else STK_MONEY if sig["side"]=="BUY" else STK_FIRE
 
-        # ── Groupe FREE → 1 seul message ────────────────────────────
+        # ── Groupe FREE → teasing uniquement (pas de niveaux) ───────
         ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
-        promo_footer = (
-            "\n━"*1+"━"*21+"\n"
-            "💎 <b>Version complète (TP/SL/Score) → PRO</b>\n"
-            "🎁 Rejoins : <code>{}</code>\n"
-            "📸 Partage à 10 amis avec preuve = PRO offert"
-        ).format(ref_admin)
-        tg_send(CHANNEL_ID, msg_free + promo_footer,
+        tg_send(CHANNEL_ID, msg_teasing,
                 kb={"inline_keyboard": [
-                    [{"text": "🎁 Activer PRO gratuit", "url": ref_admin}],
-                    [{"text": "📢 Groupe FREE", "url": FREE_GROUP_LINK},
-                     {"text": "👑 Groupe VIP",  "url": VIP_GROUP_LINK}],
+                    [{"text": "💵 Payer 10$/mois",      "url": ref_admin}],
+                    [{"text": "🤝 Parrainer 10 amis",   "url": ref_admin}],
+                    [{"text": "📢 Partager ce groupe",   "url": FREE_GROUP_LINK},
+                     {"text": "👑 Groupe VIP",           "url": VIP_GROUP_LINK}],
                 ]})
 
         # ── Groupe VIP → 1 seul message PRO complet ─────────────────
@@ -3447,7 +3255,7 @@ def _scan_and_send_inner():
         for fuid in free_users_eff:
             c = db_count_today(fuid)
             if c < FREE_LIMIT:
-                tg_send(fuid, msg_free)
+                tg_send(fuid, msg_teasing)
                 db_count_increment(fuid)
                 time.sleep(0.04)
             # Au-delà de la limite FREE → silence total
@@ -3455,24 +3263,28 @@ def _scan_and_send_inner():
     if not sigs_raw:
         log("INFO", clr("Aucun setup valide ce cycle.", "dim"))
 
-    # ── Rapport soir 20h UTC — UNE SEULE FOIS ────────────────────────
-    # == DAILY_HOUR et non >= pour ne pas se déclencher chaque minute
+    # ── Rapport soir 22h UTC — UNE SEULE FOIS ────────────────────────
     if int(hour_str) == DAILY_HOUR and _last_daily != date_str and not db_report_sent(date_str):
         stats = db_daily_stats(date_str)
         if stats["sig_count"] > 0:
             daily_pro  = _fmt_daily_report(stats)
-            daily_free = _fmt_daily_report(stats)  # même format pour FREE
+            daily_free = _fmt_daily_report(stats)
             ref_admin2 = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
             free_foot = (
-                "\n━"*1+"━"*21+"\n"
-                "💎 Passe en PRO pour les signaux complets\n"
-                "🎁 <code>{}</code>"
-            ).format(ref_admin2)
-            # Groupe FREE : rapport + promo
+                "\n━" + "━"*21 + "\n"
+                "📡 <b>{} signaux envoyés aujourd'hui aux membres PRO/VIP</b>\n\n"
+                "👑 <b>Rejoins la version PRO — 3 options :</b>\n\n"
+                "1️⃣ 💵 Payer 10$/mois → /pay\n"
+                "2️⃣ 🤝 Parrainer 10 personnes → 7j PRO gratuits\n"
+                "3️⃣ 📢 Partager ce groupe (10–30 personnes + capture à @leaderOdg)\n\n"
+                "🔗 Lien à partager : <code>{}</code>"
+            ).format(stats["sig_count"], FREE_GROUP_LINK)
+            # Groupe FREE : rapport + CTA
             tg_send(CHANNEL_ID, daily_free + free_foot,
                     kb={"inline_keyboard": [
-                        [{"text": "🎁 Activer PRO gratuit", "url": ref_admin2}],
-                        [{"text": "👑 Groupe VIP", "url": VIP_GROUP_LINK}],
+                        [{"text": "💵 Payer 10$/mois",    "url": ref_admin2}],
+                        [{"text": "🤝 Parrainer 10 amis", "url": ref_admin2}],
+                        [{"text": "👑 Groupe VIP",        "url": VIP_GROUP_LINK}],
                     ]})
             # Groupe VIP : rapport complet
             tg_send(VIP_CH, daily_pro)
@@ -4132,6 +3944,51 @@ def find_swings(c, n=5):
         if c[i]["h"] == max(x["h"] for x in w): H.append((i, c[i]["h"]))
         if c[i]["l"] == min(x["l"] for x in w): L.append((i, c[i]["l"]))
     return H, L
+
+
+def fmt_signal_teasing(s):
+    """
+    Message teasing pour le groupe GRATUIT.
+    Indique la paire UNIQUEMENT — aucun sens (BUY/SELL), aucun niveau TP/SL/entry.
+    Suivi d'un CTA 3 options pour passer PRO/VIP.
+    """
+    emo  = CAT_EMO.get(s["cat"], "📊")
+    ref_admin = "https://t.me/{}?start={}".format(BOT_USER, ADMIN_ID)
+
+    teasing = (
+        "📡 <b>SIGNAL détecté — {name}</b>  {emo}\n"
+        + "═" * 22 + "\n\n"
+        "Un signal sur <b>{name}</b> vient d'être envoyé\n"
+        "aux membres <b>PRO / VIP</b> avec :\n"
+        "  ✅ Direction (BUY/SELL)\n"
+        "  🎯 Prix d'entrée exact\n"
+        "  📊 TP · SL · Score ICT\n"
+        "  💵 Gains estimés par lot\n\n"
+        "⏳ <i>Tu aurais pu prendre ce trade !</i>\n\n"
+        "━" * 22 + "\n"
+        "👑 <b>REJOINS LA VERSION PRO — 3 FAÇONS :</b>\n\n"
+        "1️⃣ <b>Payer l'abonnement</b>\n"
+        "   💵 10$ USDT/mois → accès immédiat\n"
+        "   👉 /pay ou contacte @leaderOdg\n\n"
+        "2️⃣ <b>Parrainer des amis</b>\n"
+        "   🔗 Partage ton lien de parrainage\n"
+        "   📸 10 personnes → <b>7 jours PRO gratuits</b>\n"
+        "   📸 30 personnes → <b>1 mois PRO gratuit</b>\n"
+        "   👉 Envoie la preuve à @leaderOdg\n\n"
+        "3️⃣ <b>Partager ce groupe</b>\n"
+        "   📢 Partage à 10–30 personnes minimum\n"
+        "   📸 Envoie les captures à @leaderOdg\n"
+        "   🎁 Accès VIP activé manuellement\n\n"
+        "━" * 22 + "\n"
+        "🔗 Lien du groupe à partager :\n"
+        "<code>{free_link}</code>\n\n"
+        "🤖 AlphaBot PRO  ·  @leaderOdg_bot"
+    ).format(
+        name=s["name"], emo=emo,
+        ref_admin=ref_admin,
+        free_link=FREE_GROUP_LINK,
+    )
+    return teasing
 
 
 def fmt_signal_free(s, news, sl):
