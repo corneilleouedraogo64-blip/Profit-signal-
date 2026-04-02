@@ -1,4 +1,5 @@
 
+
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║   ALPHABOT FUTURES LIVE v4.0 — STRATÉGIE ICT PURE             ║
@@ -70,8 +71,8 @@ from typing import Optional, Tuple, List, Dict
 # ══ COLLE TES NOUVELLES CLÉS ICI (après révocation des anciennes) ══
 API_KEY    = os.environ.get("BINANCE_KEY",    "71ZEp7Et0NSEQ3kaT52bigzcni7t7H6WD6iMP8AWvZR0Z0lTLWsZngigRBSFIWTE")
 API_SECRET = os.environ.get("BINANCE_SECRET", "JpAFPnepk9a3uQDf7uHqFEDeuD2kgmBHYItlXEixabxCkEDlRabnGC6bBoF4IYy6")
-TG_TOKEN   = os.environ.get("TG_TOKEN","8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID","8665812395:")
+TG_TOKEN   = os.environ.get("TG_TOKEN",       "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID",     "8665812395")
 # ══ Pour le testnet Binance, change aussi BASE_URL plus bas ══
 
 # ═══════════════════════════════════════════════════════════════
@@ -2574,10 +2575,11 @@ def main():
 
 # ═══════════════════════════════════════════════════════════════
 #  🌐  FLASK KEEPALIVE — VPS / Render / Railway
-#  Empêche le process de s'arrêter sur les hébergeurs web.
-#  Lance le bot dans un thread séparé, Flask répond aux pings.
+#  Flask tourne sur le thread PRINCIPAL (visible par Render).
+#  Le bot tourne dans un thread daemon séparé.
 # ═══════════════════════════════════════════════════════════════
 import threading
+import traceback
 
 try:
     from flask import Flask, jsonify
@@ -2585,17 +2587,19 @@ try:
 except ImportError:
     _flask_ok = False
 
+_bot_status = {"running": False, "cycle": 0, "started_at": None, "error": None}
+
 if _flask_ok:
-    _app  = Flask(__name__)
-    _bot_status = {"running": False, "cycle": 0, "started_at": None}
+    _app = Flask(__name__)
 
     @_app.route("/")
     def index():
         return jsonify({
-            "bot"       : "AlphaBot Futures v3.0",
+            "bot"       : "AlphaBot Futures v4.0",
             "status"    : "running" if _bot_status["running"] else "stopped",
             "cycle"     : _bot_status["cycle"],
             "started_at": _bot_status["started_at"],
+            "error"     : _bot_status["error"],
             "symbols"   : len(SYMBOLS),
             "top_n"     : TOP_N_SYMBOLS,
         })
@@ -2604,31 +2608,46 @@ if _flask_ok:
     def health():
         return "OK", 200
 
-    def _run_flask():
-        port = int(os.environ.get("PORT", 8080))
-        log(f"🌐 Flask keepalive démarré sur port {port}", "INFO")
-        _app.run(host="0.0.0.0", port=port, use_reloader=False)
-
-
-# ═══════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    # ── Lancer Flask en arrière-plan si disponible ────────────
-    if _flask_ok:
-        t = threading.Thread(target=_run_flask, daemon=True)
-        t.start()
-        _bot_status["started_at"] = datetime.now().isoformat()
-        _bot_status["running"]    = True
-    else:
-        log("Flask non installé — mode standalone (pas de keepalive web)", "WARN")
-
+# ── Bot loop — tourne dans un thread daemon ────────────────────
+def _run_bot():
+    _bot_status["running"]    = True
+    _bot_status["started_at"] = datetime.now().isoformat()
     try:
         main()
     except KeyboardInterrupt:
-        print(grn(bld("\n  ✋ Bot arrêté manuellement. Bonne session !")))
+        pass
     except Exception as e:
+        tb = traceback.format_exc()
+        _bot_status["error"] = str(e)
         log(f"ERREUR CRITIQUE: {e}", "ERROR")
-        tg_send(f"🚨 <b>AlphaBot v3.0 CRASH</b>\n{e}")
-        raise
+        log(tb, "ERROR")
+        # Envoie le traceback complet sur Telegram (tronqué à 3800 chars)
+        tg_send(
+            f"🚨 <b>AlphaBot v4.0 CRASH</b>\n"
+            f"<code>{tb[-3800:]}</code>"
+        )
     finally:
-        if _flask_ok:
-            _bot_status["running"] = False
+        _bot_status["running"] = False
+
+_bot_thread = threading.Thread(target=_run_bot, daemon=True)
+_bot_thread.start()
+
+# ── Flask (ou HTTP minimal) sur le thread PRINCIPAL ───────────
+# Render détecte le port dans les 90 premières secondes.
+# Flask DOIT être sur le thread principal pour que Render le voie.
+port = int(os.environ.get("PORT", 10000))
+
+if _flask_ok:
+    log(f"🌐 Flask démarré sur port {port}", "INFO")
+    _app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
+else:
+    import http.server, socketserver
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"AlphaBot OK")
+        def log_message(self, *a): pass
+    log(f"🌐 HTTP minimal démarré sur port {port}", "INFO")
+    with socketserver.TCPServer(("0.0.0.0", port), _H) as httpd:
+        httpd.serve_forever()
