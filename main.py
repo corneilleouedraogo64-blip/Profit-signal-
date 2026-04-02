@@ -72,7 +72,13 @@ from typing import Optional, Tuple, List, Dict
 API_KEY    = os.environ.get("BINANCE_KEY",    "71ZEp7Et0NSEQ3kaT52bigzcni7t7H6WD6iMP8AWvZR0Z0lTLWsZngigRBSFIWTE")
 API_SECRET = os.environ.get("BINANCE_SECRET", "JpAFPnepk9a3uQDf7uHqFEDeuD2kgmBHYItlXEixabxCkEDlRabnGC6bBoF4IYy6")
 TG_TOKEN   = os.environ.get("TG_TOKEN",       "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID",     "8665812395")
+# ⚠️  IMPORTANT : TG_CHAT_ID ≠ TG_TOKEN !
+# Pour trouver ton vrai chat_id :
+#   1. Envoie n'importe quel message à ton bot sur Telegram
+#   2. Ouvre : https://api.telegram.org/bot<TON_TOKEN>/getUpdates
+#   3. Cherche "chat":{"id": XXXXXXXXX} — c'est ton chat_id (souvent négatif pour un groupe)
+# Sur Render : mets la valeur dans la variable d'env TG_CHAT_ID
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID",     "6982051442")
 # ══ Pour le testnet Binance, change aussi BASE_URL plus bas ══
 
 # ═══════════════════════════════════════════════════════════════
@@ -368,16 +374,43 @@ class SessionState:
 LOG_FILE = f"alphabot_v2_{datetime.now().strftime('%Y%m%d')}.log"
 
 def log(msg: str, level: str = "INFO"):
-    ts  = datetime.now().strftime("%H:%M:%S")
+    ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     col = {"INFO": CYN, "TRADE": GRN, "WARN": YEL,
-           "ERROR": RED, "PAUSE": MAG}.get(level, RST)
+           "ERROR": RED, "PAUSE": MAG, "SL": RED, "TP": GRN}.get(level, RST)
     line = f"[{ts}][{level}] {msg}"
-    print(f"{col}{line}{RST}")
+    print(f"{col}{line}{RST}", flush=True)   # flush=True → visible immédiatement sur Render
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
+
+def log_trade_open(symbol, direction, entry, sl, tps, qty, score, risk_usd):
+    """Log détaillé d'ouverture de trade — visible dans les logs Render."""
+    arrow = "LONG >>>" if direction == "LONG" else "SHORT <<<"
+    tp_str = " | ".join(
+        f"TP{i+1}={t['price']:.6f}(@{t['r']}R,{int(t['pct']*100)}%)"
+        for i, t in enumerate(tps)
+    )
+    log(f"{'='*60}", "TRADE")
+    log(f"TRADE OUVERT [{arrow}] {symbol}", "TRADE")
+    log(f"  Entree : {entry:.6f}", "TRADE")
+    log(f"  SL     : {sl:.6f}  (risque ${risk_usd:.4f})", "TRADE")
+    log(f"  {tp_str}", "TRADE")
+    log(f"  Qte={qty}  Score={score}/{SCORE_MAX}", "TRADE")
+    log(f"{'='*60}", "TRADE")
+
+def log_trade_close(symbol, direction, entry, sl, tps, pnl, reason):
+    """Log détaillé de clôture de trade."""
+    win   = pnl >= 0
+    label = "WIN +++" if win else "LOSS ---"
+    tps_hit = [f"TP{i+1}" for i, t in enumerate(tps) if t.get("hit")]
+    log(f"{'='*60}", "TRADE")
+    log(f"TRADE CLOS [{label}] {symbol} {direction} — {reason}", "TP" if win else "SL")
+    log(f"  Entree : {entry:.6f}  SL : {sl:.6f}", "TRADE")
+    log(f"  TP touches : {', '.join(tps_hit) if tps_hit else 'AUCUN'}", "TRADE")
+    log(f"  PnL    : ${pnl:+.4f}", "TP" if win else "SL")
+    log(f"{'='*60}", "TRADE")
 
 # ═══════════════════════════════════════════════════════════════
 #  📨  TELEGRAM — NOTIFICATIONS RICHES
@@ -408,51 +441,78 @@ def _tg_raw(msg: str):
 def tg_check() -> bool:
     """Vérifie que le token Telegram est valide au démarrage."""
     global _tg_enabled
-    # ✅ FIX: vérif tous les placeholders possibles
-    placeholders = ("COLLE_TON_TOKEN_TELEGRAM_ICI", "COLLE_TON_NOUVEAU_TOKEN_TG", "")
-    if TG_TOKEN in placeholders or TG_CHAT_ID in ("COLLE_TON_CHAT_ID_ICI", ""):
+    placeholders = ("COLLE_TON_TOKEN_TELEGRAM_ICI", "COLLE_TON_NOUVEAU_TOKEN_TG",
+                    "", "REMPLACE_PAR_TON_CHAT_ID")
+    if TG_TOKEN in placeholders or TG_CHAT_ID in placeholders:
         log("Telegram non configuré — notifications désactivées", "WARN")
+        log(f"  TG_TOKEN   = {'OK' if TG_TOKEN not in placeholders else '❌ MANQUANT'}", "WARN")
+        log(f"  TG_CHAT_ID = {'OK' if TG_CHAT_ID not in placeholders else '❌ MANQUANT'}", "WARN")
         return False
+
+    # ── Vérif token ───────────────────────────────────────────
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/getMe"
         with urlreq.urlopen(url, timeout=8) as r:
             data = json.loads(r.read())
             if data.get("ok"):
                 _tg_enabled = True
-                log(f"Telegram OK → @{data['result']['username']}", "INFO")
+                log(f"Telegram token OK → @{data['result']['username']}", "INFO")
 
-                # ── CORRECTION FIX#3 : diagnostic chat_id au démarrage ──
-                # On envoie un message test pour détecter le 403 tout de suite
-                # plutôt que de le découvrir au premier trade.
+                # ── Trouver le vrai chat_id via getUpdates ────
+                try:
+                    upd_url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+                    with urlreq.urlopen(upd_url, timeout=8) as r2:
+                        upd = json.loads(r2.read())
+                        if upd.get("result"):
+                            for msg in reversed(upd["result"]):
+                                chat = (msg.get("message") or msg.get("channel_post",{})).get("chat",{})
+                                if chat.get("id"):
+                                    real_id = str(chat["id"])
+                                    log(f"  Chat_id detecte via getUpdates : {real_id}", "INFO")
+                                    if real_id != TG_CHAT_ID:
+                                        log(f"  ⚠️  TG_CHAT_ID configure = '{TG_CHAT_ID}' "
+                                            f"mais chat_id reel = '{real_id}'", "WARN")
+                                        log(f"  >>> Mets TG_CHAT_ID={real_id} dans tes env vars Render <<<", "WARN")
+                                    break
+                        else:
+                            log("  getUpdates vide — envoie un message a ton bot Telegram d'abord", "WARN")
+                except Exception as e2:
+                    log(f"  getUpdates echoue: {e2}", "WARN")
+
+                # ── Test envoi message ─────────────────────────
                 try:
                     test_url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
                     test_body = json.dumps({
                         "chat_id": TG_CHAT_ID,
-                        "text"   : "🤖 AlphaBot connecté — Telegram OK ✅",
+                        "text"   : "🤖 AlphaBot v4.0 — Telegram OK ✅\nLogs TP/SL/trades activés.",
                     }).encode("utf-8")
                     test_req = urlreq.Request(
                         test_url, data=test_body,
                         headers={"Content-Type": "application/json"},
                     )
                     urlreq.urlopen(test_req, timeout=8)
-                    log(f"Telegram chat_id OK → messages activés", "INFO")
+                    log(f"Telegram chat_id={TG_CHAT_ID} OK — messages actives", "INFO")
                 except urlerr.HTTPError as e:
                     if e.code == 403:
                         log(
-                            f"Telegram 403 : le bot ne peut pas écrire dans chat_id={TG_CHAT_ID}. "
-                            f"Envoie un message à ton bot Telegram puis relance. "
-                            f"Notifications désactivées pour cette session.",
+                            f"Telegram 403 : le bot ne peut pas ecrire dans chat_id={TG_CHAT_ID}. "
+                            f"Envoie un message a ton bot puis corrige TG_CHAT_ID. "
+                            f"Notifications desactivees.",
                             "WARN",
                         )
-                        _tg_enabled = False   # désactive pour éviter le spam de WARNs
+                        _tg_enabled = False
+                    elif e.code == 400:
+                        log(f"Telegram 400 : chat_id={TG_CHAT_ID} invalide (HTTP 400). "
+                            f"Verifie TG_CHAT_ID dans tes env vars.", "WARN")
+                        _tg_enabled = False
                     else:
-                        log(f"Telegram test message échoué: HTTP {e.code}", "WARN")
+                        log(f"Telegram test message echoue: HTTP {e.code}", "WARN")
                 except Exception as e2:
-                    log(f"Telegram test message échoué: {e2}", "WARN")
+                    log(f"Telegram test message echoue: {e2}", "WARN")
 
                 return _tg_enabled
     except Exception as e:
-        log(f"Telegram check échoué: {e}", "WARN")
+        log(f"Telegram check echoue: {e}", "WARN")
     return False
 
 def tg_send(msg: str):
@@ -479,6 +539,12 @@ def tg_startup(ss: SessionState):
     )
 
 def tg_trade_open(trade: dict, ss: SessionState):
+    # Log console détaillé (visible Render même sans Telegram)
+    log_trade_open(
+        trade["symbol"], trade["direction"],
+        trade["entry"], trade["sl"], trade["tps"],
+        trade["qty"], trade["score"], trade["risk_usd"]
+    )
     d        = trade["direction"]
     arrow    = "🟢 LONG" if d == "LONG" else "🔴 SHORT"
     tps      = trade["tps"]
@@ -546,6 +612,12 @@ def tg_trade_open(trade: dict, ss: SessionState):
     )
 
 def tg_trade_close(trade: dict, pnl: float, reason: str, ss: SessionState):
+    # Log console détaillé (visible Render même sans Telegram)
+    log_trade_close(
+        trade["symbol"], trade["direction"],
+        trade["entry"], trade["sl"], trade.get("tps", []),
+        pnl, reason
+    )
     win      = pnl >= 0
     emoji    = "🏆 WIN" if win else "💔 LOSS"
     dur      = round((time.time() - trade.get("open_time", time.time())) / 60, 1)
@@ -2456,6 +2528,17 @@ def main():
         # Refresh balance
         bal = get_balance_usdt()
         if bal > 0: ss.current_balance = bal
+
+        # ── Heartbeat log (toujours visible dans Render) ──────
+        log(
+            f"[CYCLE {cycle}] Balance=${ss.current_balance:.2f} "
+            f"| Positions={pm.count()} "
+            f"| {ss.wins}W/{ss.losses}L "
+            f"| PnL=${ss.session_pnl:+.4f} "
+            f"| SLconsec={ss.consecutive_sl}/{MAX_CONSEC_SL} "
+            f"| Duree={ss.session_duration()}",
+            "INFO"
+        )
 
         print_dashboard(pm, ss, cycle)
 
