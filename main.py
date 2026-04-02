@@ -2,8 +2,8 @@
 
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   ALPHABOT FUTURES LIVE v4.0 — STRATÉGIE ICT PURE             ║
-║   Impulsion → Retracement 50% → FVG/OB → Rejet → Entrée      ║
+║   ALPHABOT FUTURES LIVE v5.0 — STRATÉGIE ICT PURE             ║
+║   Impulsion → Retracement 50% → FVG/OB → Sweep → Rejet      ║
 ║   Full Auto | Binance USDT-M Futures | Capital micro (<$50)   ║
 ║   21 marchés | SL structurel | Risk adaptatif | TP 50/30/20%  ║
 ║   Pure stdlib | Pydroid3 Android compatible                   ║
@@ -30,12 +30,13 @@ STRATÉGIE v4.0 — ENTRÉES HAUTE PROBABILITÉ SEULEMENT :
                         Hammer, Engulfing, Tweezer, Pin Bar.
                         Sans rejet = pas d'entrée, peu importe le reste.
 
-SCORING (max 7) :
+SCORING (max 8) :
   +1  Impulse > 1.5× ATR (mouvement réel)
   +1  Impulse > 3.0× ATR (mouvement fort — bonus)
   +2  FVG présente et partiellement comblée dans la zone
   +1  Order Block confluent dans la zone
   +2  Bougie de rejet validée
+  +1  Prise de liquidité (sweep high/low) détectée
   ──────────────────────────────────────────────────────
   Entrée si score ≥ 4 (FVG + rejet minimum)
 
@@ -119,7 +120,7 @@ RISK_MIN_PCT = 0.05   # plancher 5% sur micro compte
 FEE_RATE = 0.0004   # 0.04% taker (total aller-retour = 0.08%)
 
 # ── Positions & timing ────────────────────────────────────────
-MAX_POSITIONS     = 3     # max positions simultanées (étendu à 3 pour 21 marchés)
+MAX_POSITIONS     = 2     # max 2 positions simultanées (ICT : qualité > quantité)
 COOLDOWN_MIN      = 15    # minutes d'attente / paire après clôture
 SCAN_INTERVAL_SEC  = 60    # secondes entre chaque cycle
 KLINES_LIMIT       = 220   # bougies M1 récupérées
@@ -182,7 +183,7 @@ REJECTION_BODY_RATIO = 0.55  # ou corps ≥ 55% (bougie forte)
 REJECTION_ENGULF_MULT = 1.20 # engulfing : corps > 1.2× corps précédent
 REJECTION_TWEEZER_TOL = 0.002 # tolérance tweezer (0.2%)
 # ── Score seuil ────────────────────────────────────────────
-SCORE_MAX           = 7
+SCORE_MAX           = 8
 SCORE_THRESH        = {"LOW": 4, "NORMAL": 4, "HIGH": 4}
 # ── Volatilité (ATR % du prix) ─────────────────────────────
 ATR_PERIOD          = 14
@@ -196,6 +197,26 @@ SL_ATR_MIN_FACTOR   = 1.5    # SL minimum = 1.5× ATR de l'entrée
 SNIPER_MODE          = True    # activer/désactiver le mode sniper
 SNIPER_COOLDOWN_MIN  = 20      # ✅ FIX: était 60min → trop rare sur micro compte
 SNIPER_MIN_SCORE     = 4       # ✅ FIX: était 6 → bloquait TOUT (score max réel = 5-6)
+
+# ── Corrélation BTC ───────────────────────────────────────────
+# Si activé, n'entre en LONG que si BTC est haussier, SHORT si BTC est baissier.
+# Filtre les trades à contre-tendance macro.
+BTC_CORRELATION      = True    # activer le filtre corrélation BTC
+BTC_LOOKBACK         = 80      # bougies M1 BTC pour déterminer la tendance
+
+# ── Prise de liquidité (Liquidity Sweep / Stop Hunt) ──────────
+# Bonus signal : le prix a chassé un high/low récent PUIS est revenu dans la zone.
+# C'est la confirmation que les Smart Money ont pris la liquidité et vont reverser.
+LIQ_SWEEP_LOOKBACK   = 25      # bougies analysées pour détecter le sweep
+LIQ_SWEEP_SCORE      = 1       # bonus de score si sweep détecté (+1)
+LIQ_SWEEP_ENABLED    = True    # activer la détection de sweep
+
+# ── Tendance de fond (HTF via bougies M1) ─────────────────────
+# Analyse les 150 dernières bougies M1 pour déterminer la tendance structurelle.
+# On ne trade QUE dans le sens de la tendance (sauf signal exceptionnel score ≥ 6).
+TREND_LOOKBACK       = 150     # bougies pour la tendance de fond
+TREND_FILTER_ENABLED = True    # activer le filtre de tendance
+TREND_MIN_SCORE_OVERRIDE = 6   # score minimum pour ignorer le filtre tendance
 
 # ── Couleurs ANSI ─────────────────────────────────────────────
 GRN="\033[92m"; RED="\033[91m"; YEL="\033[93m"
@@ -1449,6 +1470,127 @@ def vol_regime(highs, lows, closes, n: int = ATR_PERIOD):
     if pct > ATR_HIGH_MULT: return "HIGH",   pct, SCORE_THRESH["HIGH"]
     return "NORMAL", pct, SCORE_THRESH["NORMAL"]
 
+# ── Tendance de fond (Structure M1 longue) ────────────────────
+def detect_structural_trend(highs: list, lows: list, closes: list,
+                             n: int = TREND_LOOKBACK) -> str:
+    """
+    Détermine la tendance structurelle sur les N dernières bougies M1.
+
+    Méthode Higher High / Lower Low :
+      - LONG  : le prix fait des HH et HL (série de plus hauts et creux croissants)
+      - SHORT : le prix fait des LH et LL (série de plus hauts et creux décroissants)
+      - NEUTRE: structure mixte / range
+
+    Utilisée pour filtrer les trades à contre-tendance.
+    """
+    if len(closes) < n:
+        return "NEUTRE"
+
+    sub_h = highs[-n:]
+    sub_l = lows[-n:]
+
+    # Découper en 3 tiers pour comparer l'évolution de la structure
+    t1 = n // 3
+    t2 = (n * 2) // 3
+
+    # High et Low de chaque tiers
+    h1 = max(sub_h[:t1]);      l1 = min(sub_l[:t1])
+    h2 = max(sub_h[t1:t2]);    l2 = min(sub_l[t1:t2])
+    h3 = max(sub_h[t2:]);      l3 = min(sub_l[t2:])
+
+    # Tendance haussière : HH + HL sur les 3 tiers
+    bullish = (h3 > h2 > h1) and (l3 > l2 > l1)
+    # Tendance baissière : LH + LL sur les 3 tiers
+    bearish = (h3 < h2 < h1) and (l3 < l2 < l1)
+
+    if bullish: return "LONG"
+    if bearish: return "SHORT"
+
+    # Test moins strict : 2 tiers sur 3
+    semi_bull = (h3 > h1) and (l3 > l1)
+    semi_bear = (h3 < h1) and (l3 < l1)
+    if semi_bull: return "LONG"
+    if semi_bear: return "SHORT"
+    return "NEUTRE"
+
+# ── Prise de liquidité / Sweep ────────────────────────────────
+def detect_liquidity_sweep(highs: list, lows: list, closes: list,
+                            direction: str, atr: float) -> bool:
+    """
+    Détecte une prise de liquidité (stop hunt) avant retournement.
+
+    Logique ICT / SMC :
+      LONG  : le prix a cassé sous un swing low des N dernières bougies
+              (chasse les stops des longs) PUIS est remonté au-dessus.
+              → Signifie que les Smart Money ont absorbé les ventes et vont monter.
+
+      SHORT : le prix a cassé au-dessus d'un swing high des N dernières bougies
+              (chasse les stops des shorts) PUIS est redescendu en-dessous.
+              → Signifie que les Smart Money ont distribué et vont baisser.
+
+    Retourne True si un sweep est détecté dans les LIQ_SWEEP_LOOKBACK dernières bougies.
+    """
+    if not LIQ_SWEEP_ENABLED:
+        return False
+    if atr <= 0 or len(closes) < LIQ_SWEEP_LOOKBACK + 2:
+        return False
+
+    n       = min(LIQ_SWEEP_LOOKBACK, len(closes) - 2)
+    current = closes[-1]
+    tol     = atr * 0.15   # tolérance pour valider le retour au-dessus/en-dessous
+
+    if direction == "LONG":
+        # Cherche le plus bas swing sur N bougies AVANT la dernière
+        recent_lows  = lows[-(n+1):-1]
+        swing_low    = min(recent_lows)
+        # La bougie la plus basse a-t-elle cassé le swing low ?
+        swept = any(lows[-(n+1)+i] < swing_low - tol for i in range(len(recent_lows)))
+        # Le prix actuel est-il remonté au-dessus ?
+        recovered = current > swing_low + tol
+        return swept and recovered
+
+    else:  # SHORT
+        # Cherche le plus haut swing sur N bougies AVANT la dernière
+        recent_highs = highs[-(n+1):-1]
+        swing_high   = max(recent_highs)
+        # La bougie la plus haute a-t-elle cassé le swing high ?
+        swept = any(highs[-(n+1)+i] > swing_high + tol for i in range(len(recent_highs)))
+        # Le prix actuel est-il redescendu en-dessous ?
+        recovered = current < swing_high - tol
+        return swept and recovered
+
+# ── Tendance BTC (corrélation macro) ─────────────────────────
+_btc_trend_cache: dict = {"trend": "NEUTRE", "ts": 0.0}
+
+def get_btc_trend() -> str:
+    """
+    Récupère et met en cache la tendance BTC sur BTC_LOOKBACK bougies M1.
+    Cache de 3 minutes pour éviter trop d'appels API.
+    Retourne "LONG", "SHORT" ou "NEUTRE".
+    """
+    global _btc_trend_cache
+    if not BTC_CORRELATION:
+        return "NEUTRE"   # filtre désactivé → neutre = pas de contrainte
+
+    # Cache 3 minutes
+    if time.time() - _btc_trend_cache["ts"] < 180:
+        return _btc_trend_cache["trend"]
+
+    try:
+        raw = get_klines("BTCUSDT", "1m", BTC_LOOKBACK + 20)
+        if not isinstance(raw, list) or len(raw) < BTC_LOOKBACK:
+            return _btc_trend_cache["trend"]
+        btc_h = [float(x[2]) for x in raw]
+        btc_l = [float(x[3]) for x in raw]
+        btc_c = [float(x[4]) for x in raw]
+        trend = detect_structural_trend(btc_h, btc_l, btc_c, n=BTC_LOOKBACK)
+        _btc_trend_cache = {"trend": trend, "ts": time.time()}
+        log(f"  📈 BTC tendance: {trend}", "INFO")
+        return trend
+    except Exception as e:
+        log(f"  BTC trend fetch échoué: {e}", "WARN")
+        return _btc_trend_cache["trend"]
+
 # ── Signal principal v4 ───────────────────────────────────────
 def get_signal(opens: list, highs: list, lows: list,
                closes: list, score_thresh: int) -> Optional[dict]:
@@ -1497,6 +1639,12 @@ def get_signal(opens: list, highs: list, lows: list,
     # ── 5. BOUGIE DE REJET ───────────────────────────────────
     rej_ok, rej_name = detect_rejection(opens, closes, highs, lows, direction)
 
+    # ── 6. PRISE DE LIQUIDITÉ (Sweep) ────────────────────────
+    sweep_ok = detect_liquidity_sweep(highs, lows, closes, direction, atr)
+
+    # ── 7. TENDANCE STRUCTURELLE ──────────────────────────────
+    struct_trend = detect_structural_trend(highs, lows, closes, n=TREND_LOOKBACK)
+
     # ── SCORING ──────────────────────────────────────────────
     score = 0
     score += 1                      # impulse présente
@@ -1508,6 +1656,8 @@ def get_signal(opens: list, highs: list, lows: list,
         score += 1                  # OB confluent
     if rej_ok:
         score += 2                  # bougie de rejet
+    if sweep_ok and LIQ_SWEEP_ENABLED:
+        score += LIQ_SWEEP_SCORE    # prise de liquidité confirmée
 
     # ── FILTRES D'ENTRÉE OBLIGATOIRES ─────────────────────────
     # On n'entre JAMAIS sans rejet ET sans FVG ou OB
@@ -1515,6 +1665,13 @@ def get_signal(opens: list, highs: list, lows: list,
         return None   # pas de confirmation de retournement
     if not fvg_ok and not ob_ok:
         return None   # pas de structure Smart Money dans la zone
+
+    # ── FILTRE TENDANCE DE FOND ───────────────────────────────
+    # Si la tendance structurelle est opposée au signal ET score < override,
+    # on rejette le signal (à contre-tendance = trop risqué)
+    if TREND_FILTER_ENABLED and struct_trend != "NEUTRE":
+        if struct_trend != direction and score < TREND_MIN_SCORE_OVERRIDE:
+            return None   # signal à contre-tendance, pas assez fort
 
     if score < score_thresh:
         return None
@@ -1562,11 +1719,13 @@ def get_signal(opens: list, highs: list, lows: list,
         "score"     : score,
         "reason"    : reason,
         # Métadonnées pour le dashboard
-        "swing_high": swing_high,
-        "swing_low" : swing_low,
-        "force_atr" : force_atr,
-        "fvg_ok"    : fvg_ok,
-        "ob_ok"     : ob_ok,
+        "swing_high"  : swing_high,
+        "swing_low"   : swing_low,
+        "force_atr"   : force_atr,
+        "fvg_ok"      : fvg_ok,
+        "ob_ok"       : ob_ok,
+        "sweep_ok"    : sweep_ok,
+        "struct_trend": struct_trend,
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1870,9 +2029,15 @@ class LivePositionManager:
     def open(self, symbol: str, trade: dict):
         self.positions[symbol] = trade
 
-    def close(self, symbol: str):
+    def close(self, symbol: str, skip_cooldown: bool = False):
+        """
+        Ferme une position.
+        skip_cooldown=True : pas de cooldown (clôture manuelle détectée).
+        Le bot peut immédiatement re-scanner ce symbole.
+        """
         self.positions.pop(symbol, None)
-        self.last_close[symbol] = time.time()
+        if not skip_cooldown:
+            self.last_close[symbol] = time.time()
 
     # ──────────────────────────────────────────────────────────
     @staticmethod
@@ -1974,7 +2139,7 @@ class LivePositionManager:
                     cancel_all_orders(sym)
                     if close_ord:
                         pnl = (mark_px - trade["entry"]) * trade["qty"] if d == "LONG"                               else (trade["entry"] - mark_px) * trade["qty"]
-                        to_close.append((sym, pnl, "SL_LOGICIEL"))
+                        to_close.append((sym, pnl, "SL_LOGICIEL", False))
                     else:
                         log(f"  {sym}: ⚠️ Clôture SL logiciel échouée — retry prochain cycle", "ERROR")
                     continue   # ne pas vérifier aussi is_position_open ce cycle
@@ -1997,7 +2162,7 @@ class LivePositionManager:
                     self._check_software_tps(sym, trade, mark_px)
                     if trade.get("remaining_qty", 1) <= info_step(sym):
                         pnl_est = estimate_pnl(trade)
-                        to_close.append((sym, pnl_est, "TP_LOGICIEL_COMPLET"))
+                        to_close.append((sym, pnl_est, "TP_LOGICIEL_COMPLET", False))
                 continue   # pas besoin de vérifier is_position_open — SL géré localement
 
             # ── 2. TPs logiciels seuls (SL sur exchange) ──────────
@@ -2010,14 +2175,38 @@ class LivePositionManager:
                         # Tous TPs touchés → position fermée, annuler SL exchange
                         cancel_all_orders(sym)
                         pnl_est = estimate_pnl(trade)
-                        to_close.append((sym, pnl_est, "TP_LOGICIEL_COMPLET"))
+                        to_close.append((sym, pnl_est, "TP_LOGICIEL_COMPLET", False))
                         continue
 
             # ── 3. SL sur exchange — détecter clôture Binance ─────
             open_, upnl = is_position_open(sym)
             if not open_:
                 pnl = estimate_pnl(trade)
-                to_close.append((sym, pnl, "BINANCE_CLOSED"))
+                # ── Détection clôture manuelle ────────────────────
+                # Si la position est fermée MAIS le SL et les TPs
+                # sont encore sur l'exchange → c'était une clôture
+                # manuelle. On ne pénalise pas avec un cooldown.
+                open_orders = get_open_orders(sym)
+                has_pending_sl_tp = len(open_orders) > 0
+                manual_close = has_pending_sl_tp   # ordres encore là = pas déclenché
+
+                if manual_close:
+                    reason_close = "MANUAL_CLOSE"
+                    cancel_all_orders(sym)
+                    log(
+                        f"{sym} CLÔTURÉ MANUELLEMENT | "
+                        f"Ordres annulés | Pas de cooldown → re-scan immédiat",
+                        "TRADE",
+                    )
+                    tg_send(
+                        f"✋ <b>{sym} CLÔTURE MANUELLE détectée</b>\n"
+                        f"Ordres SL/TP annulés automatiquement.\n"
+                        f"🔍 Le bot continue de scanner ce symbole sans délai."
+                    )
+                else:
+                    reason_close = "BINANCE_CLOSED"
+
+                to_close.append((sym, pnl, reason_close, manual_close))
                 result = "WIN" if pnl >= 0 else "LOSS"
                 log(f"{sym} CLÔTURÉ | PnL≈${pnl:.4f} | {result}", "TRADE")
             else:
@@ -2025,12 +2214,11 @@ class LivePositionManager:
                 dur = round((time.time() - trade.get("open_time", time.time())) / 60, 1)
                 log(f"  {sym} OPEN | uPnL: {col(f'${upnl:.4f}')} | {dur}min", "INFO")
 
-        for sym, pnl, reason in to_close:
+        for sym, pnl, reason, is_manual in to_close:
             trade = self.positions.get(sym, {})
 
             # ── Annuler tous les ordres exchange ouverts ──────────
-            # Évite les ordres SL/TP "zombies" qui pourraient ouvrir
-            # une position inverse après que la position est déjà clôturée.
+            # (déjà annulés si manual_close, mais on sécurise)
             cancel_all_orders(sym)
 
             journal_close(trade, pnl, reason)
@@ -2053,7 +2241,8 @@ class LivePositionManager:
                 log(f"⏸️  PAUSE — {reason_p}", "PAUSE")
                 tg_pause(reason_p, ss)
 
-            self.close(sym)
+            # Clôture manuelle → pas de cooldown (re-scan immédiat)
+            self.close(sym, skip_cooldown=is_manual)
 
     def reconcile(self, ss: "SessionState"):
         """
@@ -2294,6 +2483,11 @@ def scan_and_rank_symbols(
 
     log(f"🔭 Scan {len(SYMBOLS)} marchés...", "INFO")
 
+    # ── Récupérer la tendance BTC une fois pour tout le cycle ─
+    btc_trend = get_btc_trend()
+    if BTC_CORRELATION:
+        log(f"  📈 BTC tendance cycle: {btc_trend}", "INFO")
+
     for symbol in SYMBOLS:
         # ── Pré-filtres rapides (sans fetch) ──────────────────
         can, reason = pm.can_open(symbol, ss)
@@ -2325,6 +2519,22 @@ def scan_and_rank_symbols(
                             "skip_reason": f"pas de signal [{regime}]"})
             continue
 
+        # ── Filtre corrélation BTC ─────────────────────────────
+        # On n'entre QUE si BTC confirme la direction (ou BTC neutre)
+        # Exception : score élite (≥ TREND_MIN_SCORE_OVERRIDE)
+        if (BTC_CORRELATION
+                and btc_trend != "NEUTRE"
+                and btc_trend != sig["direction"]
+                and sig["score"] < TREND_MIN_SCORE_OVERRIDE):
+            skipped.append({"symbol": symbol,
+                            "skip_reason": f"BTC {btc_trend} ≠ signal {sig['direction']}"})
+            log(
+                f"  ⚡ {symbol}: signal {sig['direction']} rejeté "
+                f"(BTC={btc_trend}, score={sig['score']})",
+                "INFO",
+            )
+            continue
+
         results.append({
             "symbol" : symbol,
             "sig"    : sig,
@@ -2341,6 +2551,8 @@ def scan_and_rank_symbols(
             f"Rejet:{sig['crt_name']:15s} "
             f"FVG:{'✅' if sig.get('fvg_ok') else '✖'}  "
             f"OB:{'✅' if sig.get('ob_ok') else '✖'}  "
+            f"Sweep:{'✅' if sig.get('sweep_ok') else '✖'}  "
+            f"Trend:{sig.get('struct_trend','?')}  "
             f"{sig.get('force_atr','?')}×ATR  "
             f"Fib:{sig['fib_zone']} [{regime}]",
             "TRADE",
@@ -2389,16 +2601,18 @@ def tg_scan_summary(ranked: List[dict], total: int):
         sl_pct = round(abs(entry - sl_raw) / entry * 100, 3)
         tp1    = sig["tps"][0]["price"] if sig["tps"] else 0
         rr1    = round(abs(tp1 - entry) / abs(entry - sl_raw), 2) if abs(entry - sl_raw) > 0 else 0
-        fvg_str = f"FVG✅{sig.get('imb_fill',0)*100:.0f}%" if sig.get('fvg_ok') else "FVG✖"
-        ob_str  = "OB✅" if sig.get('ob_ok') else "OB✖"
+        fvg_str  = f"FVG✅{sig.get('imb_fill',0)*100:.0f}%" if sig.get('fvg_ok') else "FVG✖"
+        ob_str   = "OB✅" if sig.get('ob_ok') else "OB✖"
+        sw_str   = "Sweep✅" if sig.get('sweep_ok') else ""
+        trnd_str = f"Trend:{sig.get('struct_trend','?')}"
         lines += (
             f"\n#{i+1} <b>{r['symbol']}</b> — {sig['direction']} "
             f"Score:<b>{r['score']}/{SCORE_MAX}</b> [{r['regime']}]\n"
             f"   Entrée: <code>{entry:.5f}</code>  "
             f"SL: <code>{sl_raw:.5f}</code> ({sl_pct}%)\n"
             f"   TP1: <code>{tp1:.5f}</code>  R:R≈1:{rr1}\n"
-            f"   {fvg_str}  {ob_str}  "
-            f"Rejet:{sig['crt_name']}  Fib:{sig['fib_zone']}\n"
+            f"   {fvg_str}  {ob_str}  {sw_str}  "
+            f"Rejet:{sig['crt_name']}  Fib:{sig['fib_zone']}  {trnd_str}\n"
             f"   Impulse: {sig.get('force_atr','?')}×ATR  "
             f"SwingH:{sig.get('swing_high',0):.5f}  SwingL:{sig.get('swing_low',0):.5f}\n"
         )
@@ -2626,6 +2840,8 @@ def main():
                         f"Rejet:{sig['crt_name']} "
                         f"FVG:{'✅' if sig.get('fvg_ok') else '✖'} "
                         f"OB:{'✅' if sig.get('ob_ok') else '✖'} "
+                        f"Sweep:{'✅' if sig.get('sweep_ok') else '✖'} "
+                        f"Trend:{sig.get('struct_trend','?')} "
                         f"{sig.get('force_atr','?')}×ATR [{regime}]",
                         "TRADE",
                     )
@@ -2734,3 +2950,5 @@ else:
     log(f"🌐 HTTP minimal démarré sur port {port}", "INFO")
     with socketserver.TCPServer(("0.0.0.0", port), _H) as httpd:
         httpd.serve_forever()
+
+
