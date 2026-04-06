@@ -86,10 +86,38 @@ import json
 import argparse
 import requests
 import traceback
+import threading
+import os
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from flask import Flask
 
 # pandas / yfinance / ccxt supprimés — données via requests uniquement
+
+# ════════════════════════════════════════════════════════
+#  🌐  FLASK KEEP-ALIVE — Pour Render.com (FREE tier)
+#      Render tue tout service qui n'écoute pas sur PORT.
+#      Ce mini-serveur Flask tourne en daemon thread.
+# ════════════════════════════════════════════════════════
+_flask_app = Flask(__name__)
+
+@_flask_app.route("/")
+def _home():
+    return "🤖 AlphaBot Signal v6.29 — En ligne ✅", 200
+
+@_flask_app.route("/health")
+def _health():
+    return "OK", 200
+
+def _start_flask():
+    port = int(os.environ.get("PORT", 8080))
+    _flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+def keep_alive():
+    """Démarre Flask dans un thread daemon (non-bloquant)."""
+    t = threading.Thread(target=_start_flask, daemon=True)
+    t.start()
+    print(f"[keep_alive] 🌐 Flask démarré sur PORT={os.environ.get('PORT', 8080)}", flush=True)
 
 
 # ════════════════════════════════════════════════════════
@@ -2926,6 +2954,10 @@ def main():
 #  🖥️  CLI
 # ════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # ── Démarrer Flask keep-alive AVANT le bot ────────────
+    # (obligatoire pour Render.com — doit écouter sur PORT)
+    keep_alive()
+
     parser = argparse.ArgumentParser(description="AlphaBot Signal v6.21")
     parser.add_argument(
         "--backtest", nargs="+", metavar=("SYMBOL", "DAYS"),
