@@ -244,22 +244,143 @@ def log(msg, level="INFO"):
 
 
 # ════════════════════════════════════════════════════════
-#  📲  TELEGRAM
+#  👥  GESTION MULTI-USERS (broadcast à tous les abonnés)
 # ════════════════════════════════════════════════════════
-def tg(msg):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        log("⚠️  Configure TG_TOKEN et TG_CHAT_ID !", "WARN")
+USERS_FILE = "bot_users.json"
+_users: set = set()   # Chat IDs enregistrés
+
+def load_users():
+    """Charge les users depuis le fichier JSON."""
+    global _users
+    if Path(USERS_FILE).exists():
+        try:
+            with open(USERS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            _users = set(str(x) for x in data.get("users", []))
+            log(f"👥 {len(_users)} user(s) chargé(s) depuis {USERS_FILE}", "INFO")
+        except Exception as e:
+            log(f"Erreur chargement users: {e}", "WARN")
+    # Toujours inclure le TG_CHAT_ID admin par défaut
+    if TG_CHAT_ID:
+        _users.add(str(TG_CHAT_ID))
+
+def save_users():
+    """Sauvegarde les users dans le fichier JSON."""
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"users": list(_users)}, f, indent=2)
+    except Exception as e:
+        log(f"Erreur sauvegarde users: {e}", "WARN")
+
+def register_user(chat_id: str):
+    """Enregistre un nouvel user."""
+    chat_id = str(chat_id)
+    if chat_id not in _users:
+        _users.add(chat_id)
+        save_users()
+        log(f"👥 Nouvel user enregistré: {chat_id} | Total: {len(_users)}", "INFO")
+        return True
+    return False
+
+def unregister_user(chat_id: str):
+    """Retire un user."""
+    chat_id = str(chat_id)
+    if chat_id in _users:
+        _users.discard(chat_id)
+        save_users()
+        log(f"👥 User retiré: {chat_id} | Total: {len(_users)}", "INFO")
+        return True
+    return False
+
+
+# ── Polling Telegram pour /start et /stop ─────────────
+_last_update_id = 0
+
+def poll_telegram_commands():
+    """
+    Polling léger : récupère les commandes /start et /stop.
+    Appelé à chaque cycle de scan (non-bloquant).
+    /start → enregistre le user → envoi signal direct
+    /stop  → retire le user
+    """
+    global _last_update_id
+    if not TG_TOKEN:
         return
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+            params={"offset": _last_update_id + 1, "timeout": 1, "limit": 20},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        for update in data.get("result", []):
+            _last_update_id = update["update_id"]
+            msg_obj = update.get("message") or update.get("channel_post")
+            if not msg_obj:
+                continue
+            chat_id = str(msg_obj["chat"]["id"])
+            text    = (msg_obj.get("text") or "").strip().lower()
+
+            if text.startswith("/start"):
+                is_new = register_user(chat_id)
+                welcome = (
+                    f"🤖 <b>AlphaBot Signal v6.29</b>\\n"
+                    f"{'─'*30}\\n"
+                    f"{'✅ Bienvenue ! Tu recevras tous les signaux ICT/SMC.' if is_new else '✅ Tu étais déjà abonné !'}"
+                    f"\\n\\n📊 {len(SYMBOLS)} marchés scannés | Score min {SCORE_MIN}/6"
+                    f"\\n💰 Risque {RISK_PCT*100:.0f}% par trade"
+                    f"\\n\\n🔴 /stop pour se désabonner"
+                )
+                _tg_single(chat_id, welcome)
+
+            elif text.startswith("/stop"):
+                removed = unregister_user(chat_id)
+                bye = "✅ Désabonné. Tu ne recevras plus de signaux." if removed else "ℹ️ Tu n'étais pas abonné."
+                _tg_single(chat_id, bye)
+
+    except Exception as e:
+        log(f"poll_commands erreur: {e}", "WARN")
+
+
+# ════════════════════════════════════════════════════════
+#  📲  TELEGRAM — BROADCAST MULTI-USERS
+# ════════════════════════════════════════════════════════
+def _tg_single(chat_id: str, msg: str):
+    """Envoie un message à un seul chat_id."""
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
             timeout=10,
         )
-        if resp.status_code != 200:
-            log(f"TG erreur {resp.status_code}", "WARN")
+        if resp.status_code == 403:
+            # User a bloqué le bot → le retirer
+            log(f"TG 403 → user {chat_id} bloqué, retiré", "WARN")
+            _users.discard(chat_id)
+            save_users()
+        elif resp.status_code not in (200, 400):
+            log(f"TG {chat_id} erreur {resp.status_code}", "WARN")
     except Exception as e:
-        log(f"TG exception: {e}", "WARN")
+        log(f"TG exception {chat_id}: {e}", "WARN")
+
+def tg(msg: str):
+    """
+    Broadcast le message à TOUS les users enregistrés.
+    Si aucun user → envoie au TG_CHAT_ID admin par défaut.
+    """
+    if not TG_TOKEN:
+        log("⚠️  Configure TG_TOKEN !", "WARN")
+        return
+    targets = _users if _users else ({str(TG_CHAT_ID)} if TG_CHAT_ID else set())
+    if not targets:
+        log("⚠️  Aucun destinataire TG configuré !", "WARN")
+        return
+    for chat_id in list(targets):
+        _tg_single(chat_id, msg)
+        if len(targets) > 1:
+            time.sleep(0.05)  # anti-flood Telegram
 
 
 # ════════════════════════════════════════════════════════
@@ -2658,9 +2779,13 @@ def main():
     global _last_report_day
 
     log("═══════════════════════════════════════════════════════════")
-    log("  AlphaBot SIGNAL v6.21                                     ")
-    log("  OB ICT + BOS/CHoCH + ForexFactory | Volatilité Adaptative   ")
+    log("  AlphaBot SIGNAL v6.29                                     ")
+    log("  Volatilité Priority + Multi-User Broadcast               ")
     log("═══════════════════════════════════════════════════════════")
+
+    # ── Chargement des users ──────────────────────────────
+    load_users()
+    log(f"👥 {len(_users)} abonné(s) actif(s)", "INFO")
 
     if TWELVE_DATA_KEY:
         log("✅ TwelveData API configurée", "DATA")
@@ -2679,16 +2804,17 @@ def main():
         log("⚠️  TG_TOKEN / TG_CHAT_ID non configurés → MODE CONSOLE (signaux affichés ici uniquement)", "WARN")
     else:
         tg(
-            f"🤖 <b>AlphaBot SIGNAL v6.21 — Démarré</b>\n"
+            f"🤖 <b>AlphaBot SIGNAL v6.29 — Démarré</b>\n"
             f"{'─'*32}\n"
             f"📊 {len(SYMBOLS)} marchés | SMC/ICT Elite\n"
+            f"🔥 Priorité Volatilité activée 🆕\n"
+            f"👥 Broadcast multi-users 🆕 | /start pour s'abonner\n"
             f"🏦 Order Blocks ICT + Mitigation tracking\n"
             f"📐 BOS / CHoCH structure avancée\n"
-            f"📈 Volatilité adaptative weekend/SB 🆕\n"
             f"📰 News : {'ForexFactory live 🟢' if FF_NEWS_ENABLED else 'horaires fixes ⚠️'}\n"
             f"📡 Données : {'TwelveData' if TWELVE_DATA_KEY else 'Yahoo REST'} + Binance REST\n"
             f"💰 ${BALANCE:.0f} | Risque {RISK_PCT*100:.0f}%\n"
-            f"✅ Prêt !"
+            f"✅ Prêt ! | {len(_users)} abonné(s)"
         )
 
     cooldowns    = {}
@@ -2710,6 +2836,9 @@ def main():
             send_daily_report()
             _last_report_day = today
 
+        # ── Polling commandes Telegram (/start /stop) ──────
+        poll_telegram_commands()
+
         # ── Sélection des symboles actifs pour ce cycle ────
         if weekend:
             active = ["BTCUSD"]   # weekend → BTC uniquement
@@ -2718,6 +2847,26 @@ def main():
             active = [s for s in SYMBOLS if not bad_day_reason(s) and in_active_session(s)]
             if not active:
                 log("💤 Hors session — aucun marché actif", "SESSION")
+
+        # ── 🔥 PRIORITÉ VOLATILITÉ — trier par ATR/price desc ──
+        # Scanne les marchés les plus volatils EN PREMIER pour capter
+        # les setups ICT sur les mouvements les plus forts du cycle.
+        if len(active) > 1:
+            vol_scores = {}
+            for sym in active:
+                try:
+                    r = get_rates(sym, "15m", "2d")
+                    if r and len(r) >= 14:
+                        a = calc_atr(r)
+                        p = r[-1]["close"]
+                        vol_scores[sym] = (a / p) if p > 0 else 0
+                    else:
+                        vol_scores[sym] = 0
+                except Exception:
+                    vol_scores[sym] = 0
+            active = sorted(active, key=lambda s: vol_scores.get(s, 0), reverse=True)
+            top3 = [(s, f"{vol_scores.get(s,0)*100:.3f}%") for s in active[:3]]
+            log(f"🔥 Priorité vol (ATR%) → {top3}", "FILTER")
 
         # ── Heartbeat Telegram toutes les 12h (message minimal) ──
         if now - _last_status >= 43200:  # 12h
