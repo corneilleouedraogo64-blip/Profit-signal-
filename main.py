@@ -152,7 +152,7 @@ SYMBOLS = {
     "US30":   {"yf": "YM=F",      "td": "DJI",      "src": "index"},
     "US100":  {"yf": "NQ=F",      "td": "NDX",      "src": "index"},
     "BTCUSD": {"yf": "BTC-USD",   "td": "BTC/USD",  "src": "crypto", "ccxt": "BTC/USDT"},
-    "ETHUSD": {"yf": "ETH-USD",   "td": "ETH/USD",  "src": "crypto", "ccxt": "ETH/USDT"},
+    "ETHUSD": {"yf": "ETH-USD",   "td": "ETH/USD",  "src": "crypto"},  # Yahoo REST uniquement
 }
 
 # ── [v6] Devises impactées par symbole (pour filtre ForexFactory) ──
