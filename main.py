@@ -1,8 +1,16 @@
 
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   ALPHABOT SIGNAL v6.28                                         ║
+║   ALPHABOT SIGNAL v8.0 — SCALPER ELITE                          ║
 ║   Scanner SMC/ICT → Signal Telegram → Tu trades manuellement    ║
+║                                                                  ║
+║   🆕 [v8.0] SPREAD + COMMISSION BROKER INTÉGRÉS                ║
+║          → apply_spread() : prix d'entrée ajusté               ║
+║          → calc_total_fees_usd() : frais totaux en $           ║
+║          → Affichage des frais dans le message Telegram         ║
+║          → Scan ultra-rapide (10s) | Cooldown 10min            ║
+║          → Watchlist 6 symboles ultra-volatils                 ║
+║          → LTF M1 (était M5) pour confirmation ultra-précise   ║
 ║                                                                  ║
 ║   ✅ [v2-v5] Toute la logique précédente (multi-sources,       ║
 ║              CSV log, backtest, liquidity sweep, HTF bias…)     ║
@@ -103,7 +111,7 @@ _flask_app = Flask(__name__)
 
 @_flask_app.route("/")
 def _home():
-    return "🤖 AlphaBot Signal v6.29 — En ligne ✅", 200
+    return "🤖 AlphaBot Signal v8.0 — En ligne ✅", 200
 
 @_flask_app.route("/health")
 def _health():
@@ -136,52 +144,53 @@ RISK_PCT   = 0.02      # 2% par trade
 SIGNALS_CSV  = "signals_log.csv"
 BACKTEST_DIR = "backtest_results"
 
-# ── Watchlist ─────────────────────────────────────────
+# ── Watchlist — 6 symboles ultra-volatils v8.0 ───────────────────
 SYMBOLS = {
-    "EURUSD": {"yf": "EURUSD=X",  "td": "EUR/USD",  "src": "forex"},
-    "GBPUSD": {"yf": "GBPUSD=X",  "td": "GBP/USD",  "src": "forex"},
-    "USDJPY": {"yf": "USDJPY=X",  "td": "USD/JPY",  "src": "forex"},
-    "AUDUSD": {"yf": "AUDUSD=X",  "td": "AUD/USD",  "src": "forex"},
-    "USDCAD": {"yf": "USDCAD=X",  "td": "USD/CAD",  "src": "forex"},
-    "EURJPY": {"yf": "EURJPY=X",  "td": "EUR/JPY",  "src": "forex"},
-    "GBPJPY": {"yf": "GBPJPY=X",  "td": "GBP/JPY",  "src": "forex"},
-    "EURGBP": {"yf": "EURGBP=X",  "td": "EUR/GBP",  "src": "forex"},
     "XAUUSD": {"yf": "GC=F",      "td": "XAU/USD",  "src": "forex"},
-    "XAGUSD": {"yf": "SI=F",      "td": "XAG/USD",  "src": "forex"},
-    "USOIL":  {"yf": "CL=F",      "td": "WTI/USD",  "src": "index"},
-    "US30":   {"yf": "YM=F",      "td": "DJI",      "src": "index"},
-    "US100":  {"yf": "NQ=F",      "td": "NDX",      "src": "index"},
     "BTCUSD": {"yf": "BTC-USD",   "td": "BTC/USD",  "src": "crypto", "ccxt": "BTC/USDT"},
-    "ETHUSD": {"yf": "ETH-USD",   "td": "ETH/USD",  "src": "crypto"},  # Yahoo REST uniquement
+    "GBPUSD": {"yf": "GBPUSD=X",  "td": "GBP/USD",  "src": "forex"},
+    "US100":  {"yf": "NQ=F",      "td": "NDX",      "src": "index"},
+    "GBPJPY": {"yf": "GBPJPY=X",  "td": "GBP/JPY",  "src": "forex"},
+    "ETHUSD": {"yf": "ETH-USD",   "td": "ETH/USD",  "src": "crypto", "ccxt": "ETH/USDT"},
 }
 
 # ── [v6] Devises impactées par symbole (pour filtre ForexFactory) ──
 SYMBOL_CURRENCIES = {
-    "EURUSD": ["EUR", "USD"], "GBPUSD": ["GBP", "USD"],
-    "USDJPY": ["USD", "JPY"], "AUDUSD": ["AUD", "USD"],
-    "USDCAD": ["USD", "CAD"], "EURJPY": ["EUR", "JPY"],
-    "GBPJPY": ["GBP", "JPY"], "EURGBP": ["EUR", "GBP"],
-    "XAUUSD": ["USD"],        "XAGUSD": ["USD"],
-    "USOIL":  ["USD"],        "US30":   ["USD"],
-    "US100":  ["USD"],        "BTCUSD": [],  # crypto non bloquée
-    "ETHUSD": [],
+    "XAUUSD": ["USD"],        "BTCUSD": [],
+    "GBPUSD": ["GBP", "USD"], "US100":  ["USD"],
+    "GBPJPY": ["GBP", "JPY"], "ETHUSD": [],
 }
 
 PIP_VALUES = {
-    "XAUUSD": 1.0,  "XAGUSD": 0.5,  "BTCUSD": 1.0,  "ETHUSD": 0.1,
-    "USOIL":  1.0,  "US30":   1.0,  "US100":  1.0,
-    "EURUSD": 10.0, "GBPUSD": 10.0, "USDJPY": 9.0,
-    "AUDUSD": 10.0, "USDCAD": 10.0, "EURJPY": 9.0,
-    "GBPJPY": 9.0,  "EURGBP": 10.0,
+    "XAUUSD": 1.0,  "BTCUSD": 1.0,  "ETHUSD": 0.1,
+    "US100":  1.0,  "GBPUSD": 10.0, "GBPJPY": 9.0,
+}
+
+# ── [v8.0] Spread & Commission broker (en price units sauf commission en $/lot) ──
+BROKER_SPREAD = {
+    "XAUUSD": 0.30,   # 30 cents typique
+    "BTCUSD": 5.0,    # $5 spread BTC
+    "ETHUSD": 0.50,
+    "GBPUSD": 0.00015,
+    "GBPJPY": 0.030,
+    "US100":  0.60,
+}
+BROKER_COMMISSION = {   # Commission aller+retour en $ par lot standard
+    "XAUUSD": 5.0,
+    "BTCUSD": 8.0,
+    "ETHUSD": 4.0,
+    "GBPUSD": 7.0,
+    "GBPJPY": 7.0,
+    "US100":  4.0,
 }
 
 VOLATILITY_THRESHOLDS = {
     "XAUUSD": 0.0010, "BTCUSD": 0.0050, "ETHUSD": 0.0050,
-    "US30": 0.0008, "US100": 0.0008, "USOIL": 0.0015, "XAGUSD": 0.0015,
+    "US100": 0.0008, "GBPUSD": 0.0005, "GBPJPY": 0.0006,
     "_forex": 0.0005,
 }
 
-PREMIUM_SYMBOLS = {"XAUUSD", "US30", "US100", "BTCUSD", "GBPUSD"}
+PREMIUM_SYMBOLS = {"XAUUSD", "US100", "BTCUSD", "GBPUSD"}
 
 # ── News horaires fixes (fallback si ForexFactory indispo) ────────
 NEWS_BLOCK_TIMES_UTC = [(8,55),(9,0),(9,30),(13,30),(15,0),(18,0),(18,30)]
@@ -211,20 +220,20 @@ FIB_LOW, FIB_HIGH = 0.45, 0.60
 FVG_LOOKBACK     = 50
 FVG_FILL_MIN     = 0.30
 FVG_FILL_MAX     = 0.85
-SCORE_MIN        = 4
+SCORE_MIN        = 7    # [v7.0] Score minimum sur 10 confirmations SMC
 RR_MIN           = 3.0
 SL_ATR_MARGIN    = 0.3
 CHOCH_LOOKBACK   = 30
 
 SESSION_WINDOWS  = [(7, 12), (13, 18)]
 BAD_HOURS        = {0: range(0, 8), 4: range(17, 24)}
-SCORE_PROBABILITY = {6: 75, 5: 68, 4: 60, 3: 50}
+SCORE_PROBABILITY = {10: 92, 9: 88, 8: 82, 7: 75, 6: 65, 5: 55, 4: 45, 3: 35}
 
-SCAN_INTERVAL     = 300
-COOLDOWN_MIN      = 60
+SCAN_INTERVAL     = 10    # [v8.0] Scan ultra-rapide
+COOLDOWN_MIN      = 10   # [v8.0] Cooldown réduit
 DAILY_REPORT_HOUR = 17
 
-TD_INTERVAL  = {"15m": "15min", "5m": "5min", "1h": "1h", "1d": "1day"}
+TD_INTERVAL  = {"15m": "15min", "5m": "5min", "1m": "1min", "1h": "1h", "1d": "1day"}
 TD_PERIOD_DAYS = {"5d": 5, "2d": 2, "30d": 30, "90d": 90}
 
 
@@ -493,7 +502,7 @@ def _fetch_binance(symbol_info: dict, interval: str, period: str):
     if not raw:
         return None
     binance_symbol = raw.replace("/", "")   # → "BTCUSDT"
-    tf_map = {"15m": "15m", "5m": "5m", "1h": "1h", "1d": "1d"}
+    tf_map = {"15m": "15m", "5m": "5m", "1m": "1m", "1h": "1h", "1d": "1d"}
     tf     = tf_map.get(interval)
     if not tf:
         return None
@@ -2207,33 +2216,127 @@ def in_killzone():
     return (7 <= hour < 9) or (13 <= hour < 15)
 
 
+def score_signal_v7(
+    direction, htf, bos_info, displacement, ob, fvg,
+    has_sweep, pd, ltf_ok, rates, price, atr
+):
+    """
+    [v7.0] SCORE SUR 10 CONFIRMATIONS SMC ELITE
+    ─────────────────────────────────────────────
+    1  pt  — HTF Bias aligné (Daily + H4 concordants)
+    1  pt  — BOS ou CHoCH confirmé sur M15
+    1  pt  — Displacement récent >= 2×ATR
+    1  pt  — Order Block ICT non mitigé
+    1  pt  — Fair Value Gap en confluence
+    2  pts — OTE 62–79% du dernier swing (zone optimale ICT)
+    1  pt  — Liquidity Sweep détecté
+    1  pt  — PD Array aligné (Discount/Premium)
+    1  pt  — Réaction LTF M5 confirmée
+    ─────────────────────────────────────────────
+    Total max = 10 | Minimum requis = 7 (SCORE_MIN)
+    """
+    sc = 0
+    details = {}
+
+    # ① HTF Bias aligné
+    htf_ok = (
+        (direction == "BULL" and htf["bias"] == "BULL") or
+        (direction == "BEAR" and htf["bias"] == "BEAR")
+    )
+    if htf_ok:
+        sc += 1
+    details["htf_bias"] = htf_ok
+
+    # ② BOS / CHoCH confirmé
+    last_evt = bos_info.get("last_event")
+    bos_ok = last_evt in ("BOS_BULL", "BOS_BEAR", "CHOCH_BULL", "CHOCH_BEAR")
+    if bos_ok:
+        sc += 1
+    details["bos_event"] = last_evt or "—"
+
+    # ③ Displacement >= 2×ATR récent dans la bonne direction
+    disp_ok = (
+        displacement is not None and
+        displacement.get("strength", 0) >= 2.0 and
+        displacement["direction"] == direction
+    )
+    if disp_ok:
+        sc += 1
+    details["displacement"] = f"{displacement['strength']}×ATR" if disp_ok else "—"
+
+    # ④ Order Block ICT non mitigé
+    ob_ok = ob is not None
+    if ob_ok:
+        sc += 1
+    details["ob"] = f"{ob['lo']:.5g}–{ob['hi']:.5g}" if ob_ok else "—"
+
+    # ⑤ Fair Value Gap en confluence
+    fvg_ok = fvg is not None
+    if fvg_ok:
+        sc += 1
+    details["fvg"] = f"{fvg['lo']:.5g}–{fvg['hi']:.5g}" if fvg_ok else "—"
+
+    # ⑥⑦ OTE Zone 62–79% du dernier swing (2 pts = zone exacte ICT)
+    ote_pts = 0
+    if len(rates) >= 20:
+        h_vals = [r["high"] for r in rates[-40:]]
+        l_vals = [r["low"]  for r in rates[-40:]]
+        swing_hi = max(h_vals)
+        swing_lo = min(l_vals)
+        span = swing_hi - swing_lo
+        if span > 0:
+            if direction == "BULL":
+                retrace = (swing_hi - price) / span
+            else:
+                retrace = (price - swing_lo) / span
+            if 0.62 <= retrace <= 0.79:
+                ote_pts = 2      # Zone OTE parfaite
+            elif 0.50 <= retrace <= 0.85:
+                ote_pts = 1      # Zone acceptable
+    sc += ote_pts
+    details["ote"] = f"OTE +{ote_pts}pts" if ote_pts > 0 else "hors OTE"
+
+    # ⑧ Liquidity Sweep détecté
+    sweep_ok = has_sweep
+    if sweep_ok:
+        sc += 1
+    details["sweep"] = sweep_ok
+
+    # ⑨ PD Array aligné (Discount pour BUY, Premium pour SELL)
+    pd_ok = pd_array_aligned(pd, direction)
+    if pd_ok:
+        sc += 1
+    details["pd_array"] = pd["zone"] if pd else "—"
+
+    # ⑩ Réaction LTF M5 confirmée (displacement / OTE / rejet)
+    if ltf_ok:
+        sc += 1
+    details["ltf"] = ltf_ok
+
+    return sc, details
+
+
 def score_signal(mst, impulse, equi, fvg, ob, rej):
-    """
-    Score /6 (inchangé vs v5, mais composante #5 = Order Block [v6]) :
-      1. Structure M15 confirmée (BOS aligné au biais HTF)
-      2. Impulse fort détecté
-      3. Equilibrium 50% (retracement Fibonacci)
-      4. FVG (Fair Value Gap) en confluence
-      5. Order Block non mitigé  ← [v6] remplace SD zone basique
-      6. Rejet de prix (Pinbar / Engulfing / Bloc)
-    """
+    """Wrapper rétrocompat v6 — utilisé dans backtest uniquement."""
     return sum([
         mst != "NEUTRAL",
         impulse is not None,
         equi,
         fvg is not None,
-        ob  is not None,   # [v6] Order Block ICT
+        ob  is not None,
         rej is not None,
     ])
 
 
-def signal_label(score, has_sweep, has_ob=False, unicorn=False):
-    if unicorn:                              return "🦄 UNICORN"
-    if score >= 6 and has_sweep and has_ob: return "⚡ ELITE ICT"
-    if score >= 6 and has_sweep:            return "⚡ ELITE"
-    if score >= 6:                          return "⚡ MAX"
-    if score >= 5:                          return "🔥 STRONG"
-    return "📊 MEDIUM"
+def signal_label(score, has_sweep=False, has_ob=False, unicorn=False):
+    """[v7.0] Labels basés sur score /10."""
+    if unicorn:     return "🦄 UNICORN"
+    if score == 10: return "💎 PERFECT 10"
+    if score >= 9:  return "⚡ ELITE ICT"
+    if score >= 8:  return "🔥 ELITE"
+    if score >= 7:  return "💪 SOLIDE"
+    if score >= 6:  return "📊 MEDIUM"
+    return "❌ FAIBLE"
 
 
 def calc_sl_choch(rates, direction, entry, atr):
@@ -2278,6 +2381,34 @@ def calc_lot(symbol, entry, sl, balance, risk_pct):
     pv  = PIP_VALUES.get(symbol, 1.0)
     lot = risk_usd / (sl_dist * pv * 100)
     return max(0.01, min(round(lot, 2), 10.0))
+
+
+def apply_spread(symbol: str, price: float, direction: str) -> float:
+    """
+    [v8.0] Applique le spread broker au prix d'entrée.
+    BUY  → entrée = ASK = price + spread/2
+    SELL → entrée = BID = price - spread/2
+    """
+    spread = BROKER_SPREAD.get(symbol, 0.0)
+    half   = spread / 2
+    if direction == "BULL":
+        return round(price + half, 5)
+    else:
+        return round(price - half, 5)
+
+
+def calc_total_fees_usd(symbol: str, lot: float) -> float:
+    """
+    [v8.0] Calcule les frais totaux en $ pour un trade :
+    spread_cost + commission aller+retour.
+    spread_cost = spread × lot × pip_value × 100
+    """
+    spread     = BROKER_SPREAD.get(symbol, 0.0)
+    commission = BROKER_COMMISSION.get(symbol, 0.0)
+    pv         = PIP_VALUES.get(symbol, 1.0)
+    spread_cost = spread * lot * pv * 100
+    total       = round(spread_cost + commission * lot, 2)
+    return total
 
 
 # ════════════════════════════════════════════════════════
@@ -2452,123 +2583,141 @@ def analyze_symbol(symbol, cooldowns=None):
         if breaker:
             log(f"  {symbol} Breaker Block {breaker['type']} @ {breaker['level']:.5g}", "SMC")
 
-        rej = check_rejection(rates_m15, d)
-        sc  = score_signal(mst, impulse, equi, fvg, ob, rej)
+        rej        = check_rejection(rates_m15, d)
+        has_sweep_d = detect_liquidity_sweep(rates_m15, d)
+        pd         = get_pd_array(rates_m15)
 
-        # [v6+] Bonus score
-        if has_inducement or has_judas: sc = min(sc + 1, 6)
-        if ifvg:                        sc = min(sc + 1, 6)
-        if breaker:                     sc = min(sc + 1, 6)
-        if is_silver_bullet_window():   sc = min(sc + 1, 6)
-        if in_killzone():               sc = min(sc + 1, 6)
+        # ── [v8.0] LTF M1 préliminaire pour le score ─────────────
+        rates_m1_pre = get_rates(symbol, "1m", "2d")
+        atr_m1_pre   = calc_atr(rates_m1_pre) if rates_m1_pre and len(rates_m1_pre) > 14 else atr
+        ltf_ok_pre, ltf_reason_pre = confirm_ltf_reaction(
+            rates_m1_pre, d, atr_m1_pre
+        ) if rates_m1_pre and len(rates_m1_pre) >= 10 else (False, "pas de données M1")
 
-        # [v6+] PD Array
-        pd = get_pd_array(rates_m15)
-        pd_ok = pd_array_aligned(pd, d)
-        if not pd_ok:
-            log(f"  {symbol} PD Array bloqué → prix en {pd['zone']} ({pd['pct']}%) pour {d}", "FILTER")
-            sc = max(sc - 2, 0)   # pénalité forte si zone opposée
+        # ── [v7.0] SCORE /10 — 10 confirmations SMC ──────────────
+        sc, smc_details = score_signal_v7(
+            direction=d,
+            htf=htf,
+            bos_info=bos_info,
+            displacement=displacement,
+            ob=ob,
+            fvg=fvg,
+            has_sweep=has_sweep_d,
+            pd=pd,
+            ltf_ok=ltf_ok_pre,
+            rates=rates_m15,
+            price=price,
+            atr=atr,
+        )
 
-        # [v6+] Unicorn Model
-        unicorn = is_unicorn_model(rates_m15, d, atr, bos_info,
-                                   detect_liquidity_sweep(rates_m15, d),
-                                   fvg, ob)
+        log(
+            f"  {symbol} [{d}] Score v7: {sc}/10 | "
+            f"HTF:{smc_details['htf_bias']} BOS:{smc_details['bos_event']} "
+            f"DISP:{smc_details['displacement']} OTE:{smc_details['ote']} "
+            f"OB:{smc_details['ob']} FVG:{smc_details['fvg']}",
+            "SMC",
+        )
+
+        # [v7.0] Bonus contextuel (max 10 — pas de dépassement)
+        unicorn = is_unicorn_model(rates_m15, d, atr, bos_info, has_sweep_d, fvg, ob)
         if unicorn:
             log(f"  {symbol} 🦄 UNICORN MODEL détecté !", "SMC")
-            sc = min(sc + 2, 6)
+            sc = min(sc + 1, 10)   # Unicorn = bonus +1 (déjà score élevé)
 
-        # [v6.28] Bonus si pattern Displacement+OB actif
-        if disp_ob and disp_ob["direction"] == d:
-            if disp_ob["in_ob"]:
-                sc = min(sc + 2, 6)   # prix dans l'OB = setup parfait
-                log(f"  {symbol} 🎯 InOB +2 score → {sc}/6", "SMC")
-            else:
-                sc = min(sc + 1, 6)   # retracement en cours, pas encore dans l'OB
+        # Bonus silver bullet / killzone (sessions ICT)
+        if is_silver_bullet_window(): sc = min(sc + 1, 10)
+        if in_killzone() and not is_silver_bullet_window(): sc = min(sc + 1, 10)
 
-        # [v6.25] Bonus si prix proche du 50% du displacement (OTE optimal)
+        # Bonus macro aligné
+        if macro and macro["bias"] == d: sc = min(sc + 1, 10)
+
+        # Bonus Displacement+OB (pattern v6.28 puissant)
         at_displacement_50 = False
+        if disp_ob and disp_ob["direction"] == d and disp_ob["in_ob"]:
+            sc = min(sc + 1, 10)
+            log(f"  {symbol} 🎯 InOB pattern → +1 bonus | Score: {sc}/10", "SMC")
+
         if displacement and displacement["direction"] == d:
             dist_to_50 = abs(price - displacement["entry_50"])
             if dist_to_50 <= atr * 0.5:
                 at_displacement_50 = True
-                sc = min(sc + 2, 6)
-                log(f"  {symbol} 🎯 Prix au 50% displacement → +2 score", "SMC")
+                sc = min(sc + 1, 10)
+                log(f"  {symbol} 🎯 50% displacement OTE → +1 bonus | Score: {sc}/10", "SMC")
 
-        # Malus si displacement opposé au HTF (incohérence macro)
-        if displacement and displacement["direction"] != htf_dir:
-            sc = max(sc - 1, 0)
-
-        # [v6.27] Bonus macro aligné
-        if macro and macro["bias"] == d:
-            sc = min(sc + 1, 6)
+        equi = in_equilibrium(price, find_impulse(rates_m15, atr)) if find_impulse(rates_m15, atr) else False
 
         if sc > best["score"]:
             best = {
-                "symbol":         symbol,
-                "score":          sc,
-                "direction":      d,
-                "mst":            mst,
-                "equi":           equi,
-                "fvg":            fvg,
-                "ob":             ob,
-                "sd":             ob,
-                "rejection":      rej,
-                "price":          price,
-                "atr":            atr,
-                "rates_m15":      rates_m15,
-                "entry_type":     "PULLBACK" if equi else "DIRECT",
-                "htf":            htf,
-                "bos_choch":      bos_info,
-                "has_inducement": has_inducement or has_judas,
-                "has_judas":      has_judas,
-                "in_killzone":    in_killzone(),
+                "symbol":           symbol,
+                "score":            sc,
+                "smc_details":      smc_details,
+                "direction":        d,
+                "mst":              mst,
+                "equi":             equi,
+                "fvg":              fvg,
+                "ob":               ob,
+                "sd":               ob,
+                "rejection":        rej,
+                "price":            price,
+                "atr":              atr,
+                "rates_m15":        rates_m15,
+                "entry_type":       "OTE" if smc_details.get("ote", "").startswith("OTE +2") else
+                                    ("PULLBACK" if equi else "DIRECT"),
+                "htf":              htf,
+                "bos_choch":        bos_info,
+                "has_sweep":        has_sweep_d,
+                "has_inducement":   is_inducement(rates_m15, d, atr) or detect_judas_swing(rates_m15, d, atr),
+                "has_judas":        detect_judas_swing(rates_m15, d, atr),
+                "in_killzone":      in_killzone(),
                 "in_silver_bullet": is_silver_bullet_window(),
-                "swing_count":    swing_count,
-                "pd_array":       pd,
-                "ifvg":           ifvg,
-                "breaker":        breaker,
-                "unicorn":        unicorn,
-                "displacement":   displacement,
-                "at_disp_50":     at_displacement_50,
-                "choch_override": choch_dir,
-                "macro":          macro,
-                "disp_ob":        disp_ob,
+                "swing_count":      swing_count,
+                "pd_array":         pd,
+                "ifvg":             detect_inversion_fvg(rates_m15, d, atr),
+                "breaker":          detect_breaker_block(rates_m15, d, atr),
+                "unicorn":          unicorn,
+                "displacement":     displacement,
+                "at_disp_50":       at_displacement_50,
+                "choch_override":   choch_dir,
+                "macro":            macro,
+                "disp_ob":          disp_ob,
+                "ltf_reason":       ltf_reason_pre,
             }
 
-    # Score minimum : 3/6 pour BTC le weekend, 4/6 sinon
+    # [v7.0] Score minimum : 6/10 pour BTC le weekend, 7/10 sinon
     wday = datetime.now(timezone.utc).weekday()
-    score_min = 3 if (symbol == "BTCUSD" and wday >= 5) else SCORE_MIN
+    score_min = 6 if (symbol == "BTCUSD" and wday >= 5) else SCORE_MIN
 
     if best["score"] < score_min:
+        log(f"  {symbol}: score {best['score']}/10 < {score_min} requis — skip", "FILTER")
         return None
 
-    rates_m5 = get_rates(symbol, "5m", "2d")
-    if not rates_m5 or len(rates_m5) < 20:
+    rates_m1 = get_rates(symbol, "1m", "2d")
+    if not rates_m1 or len(rates_m1) < 20:
         return None
 
     direction  = best["direction"]
-    atr_m5     = calc_atr(rates_m5)
-    mst_m5     = market_structure(rates_m5, 30)
-    m5_aligned = (
-        (direction == "BULL" and mst_m5 == "BULLISH") or
-        (direction == "BEAR" and mst_m5 == "BEARISH")
+    atr_m1     = calc_atr(rates_m1)
+    mst_m1     = market_structure(rates_m1, 30)
+    m1_aligned = (
+        (direction == "BULL" and mst_m1 == "BULLISH") or
+        (direction == "BEAR" and mst_m1 == "BEARISH")
     )
-    # [v6.26] Si CHoCH ou displacement override actif → M5 alignment non bloquant
-    # Le CHoCH est lui-même un retournement, M5 peut être encore dans l'ancienne direction
+    # [v6.26] Si CHoCH ou displacement override actif → M1 alignment non bloquant
+    # Le CHoCH est lui-même un retournement, M1 peut être encore dans l'ancienne direction
     override_active = (choch_dir is not None) or (best.get("displacement") is not None)
-    if not m5_aligned and not override_active:
+    if not m1_aligned and not override_active:
         return None
-    if not m5_aligned and override_active:
-        log(f"  {symbol}: M5 non aligné mais override actif → on continue", "FILTER")
+    if not m1_aligned and override_active:
+        log(f"  {symbol}: M1 non aligné mais override actif → on continue", "FILTER")
 
-    # [v6+] Confirmation LTF (OTE / displacement / rejet M5)
-    ltf_ok, ltf_reason = confirm_ltf_reaction(rates_m5, direction, atr_m5)
+    # [v6+] Confirmation LTF (OTE / displacement / rejet M1)
+    ltf_ok, ltf_reason = confirm_ltf_reaction(rates_m1, direction, atr_m1)
     if not ltf_ok:
-        log(f"  {symbol}: LTF non confirmé ({ltf_reason}) — skip", "FILTER")
+        log(f"  {symbol}: LTF M1 non confirmé ({ltf_reason}) — skip", "FILTER")
         return None
-    log(f"  {symbol}: LTF confirmé → {ltf_reason}", "SMC")
+    log(f"  {symbol}: LTF M1 confirmé → {ltf_reason}", "SMC")
 
-    rej_m5    = check_rejection(rates_m5, direction)
+    rej_m1    = check_rejection(rates_m1, direction)
     has_sweep = detect_liquidity_sweep(rates_m15, direction)
 
     sl   = calc_sl_choch(rates_m15, direction, price, atr)
@@ -2588,8 +2737,8 @@ def analyze_symbol(symbol, cooldowns=None):
         "sl":          sl,
         "risk":        risk,
         "sign":        sign,
-        "mst_m5":      mst_m5,
-        "rej_m5":      rej_m5,
+        "mst_m5":      mst_m1,
+        "rej_m5":      rej_m1,
         "has_sweep":   has_sweep,
         "ltf_reason":  ltf_reason,
         "dynamic_tp":  dynamic_tp,
@@ -2616,9 +2765,12 @@ def send_signal(sig, sess):
     bos_info  = sig.get("bos_choch", {})
     last_evt  = bos_info.get("last_event")
 
-    tp1 = round(price + risk * 1.0 * sign, 5)
-    tp2 = round(price + risk * 2.0 * sign, 5)
-    tp3 = round(price + risk * 3.0 * sign, 5)
+    # [v8.0] Prix d'entrée ajusté avec le spread broker
+    entry_with_spread = apply_spread(symbol, price, direction)
+
+    tp1 = round(entry_with_spread + risk * 1.0 * sign, 5)
+    tp2 = round(entry_with_spread + risk * 2.0 * sign, 5)
+    tp3 = round(entry_with_spread + risk * 3.0 * sign, 5)
 
     # [v6+] TP dynamique si disponible
     dynamic_tp = sig.get("dynamic_tp")
@@ -2627,6 +2779,7 @@ def send_signal(sig, sess):
 
     lot      = calc_lot(symbol, price, sl, BALANCE, RISK_PCT)
     risk_usd = round(BALANCE * RISK_PCT, 2)
+    fees_usd = calc_total_fees_usd(symbol, lot)   # [v8.0]
     prob     = dynamic_probability(
         score, sess, symbol, has_sweep,
         has_ob=(ob is not None), last_event=last_evt,
@@ -2649,6 +2802,22 @@ def send_signal(sig, sess):
 
     # ── Liste des confluences ─────────────────────────
     setup_items = []
+    smc_details = sig.get("smc_details", {})
+    # [v7.0] Affiche le détail des 10 confirmations
+    if smc_details:
+        checks = [
+            ("HTF Bias",    smc_details.get("htf_bias", False)),
+            ("BOS/CHoCH",   smc_details.get("bos_event") not in (None, "—")),
+            ("Displacement",smc_details.get("displacement") != "—"),
+            ("Order Block", smc_details.get("ob") != "—"),
+            ("FVG",         smc_details.get("fvg") != "—"),
+            ("OTE Zone",    smc_details.get("ote", "").startswith("OTE +")),
+            ("Sweep",       smc_details.get("sweep", False)),
+            ("PD Array",    smc_details.get("pd_array") not in (None, "—")),
+            ("LTF M1",      smc_details.get("ltf", False)),
+        ]
+        checks_str = " | ".join(f"{'✅' if v else '❌'} {k}" for k,v in checks)
+        setup_items.append(f"📋 {checks_str}")
     if sig.get("choch_override"):
         setup_items.append(f"✔ CHoCH Override → {sig['choch_override']} 🔄")
     disp_ob = sig.get("disp_ob")
@@ -2688,7 +2857,7 @@ def send_signal(sig, sess):
     if sig["rejection"]:
         setup_items.append(f"✔ Rejet M15 ({sig['rejection']})")
     if rej_m5:
-        setup_items.append(f"✔ Rejet M5 ({rej_m5})")
+        setup_items.append(f"✔ Rejet M1 ({rej_m5})")
     if has_sweep:
         setup_items.append("✔ Liquidity Sweep 💧")
     if sig.get("has_judas"):
@@ -2700,7 +2869,7 @@ def send_signal(sig, sess):
     if sig.get("in_killzone") and not sig.get("in_silver_bullet"):
         setup_items.append("✔ Killzone London/NY ⚡")
     if sig.get("ltf_reason"):
-        setup_items.append(f"✔ LTF confirmé → {sig['ltf_reason']}")
+        setup_items.append(f"✔ LTF M1 confirmé → {sig['ltf_reason']}")
     if sig.get("ifvg"):
         setup_items.append(f"✔ iFVG {sig['ifvg']['type']} 🔄")
     if sig.get("breaker"):
@@ -2714,14 +2883,17 @@ def send_signal(sig, sess):
         setup_items.append(f"✔ TP sur liquidité cible 🎯")
     setup_str = "\n".join(f"  {x}" for x in setup_items)
 
+    # [v8.0] Spread info line
+    spread_val = BROKER_SPREAD.get(symbol, 0.0)
+
     msg = (
         f"{'═'*34}\n"
-        f"🔥 <b>ALPHABOT ELITE SIGNAL v6</b>\n"
+        f"🔥 <b>ALPHABOT ELITE SIGNAL v8</b>\n"
         f"{'═'*34}\n"
         f"📊 <b>{symbol}</b>  —  {dir_emoji}  {label}\n"
         f"⏰ {sess}  |  📅 {datetime.now(timezone.utc).strftime('%A %d/%m')}\n"
         f"{'─'*34}\n"
-        f"🎯 <b>Probabilité : {prob}%</b>  |  Score : {score}/6\n"
+        f"🎯 <b>Probabilité : {prob}%</b>  |  Score : {score}/10\n"
         f"{'─'*34}\n"
         f"🌍 Daily : {daily_icon} {htf['daily']}  |  H4 : {h4_icon} {htf['h4']}\n"
         f"  Biais : <b>{htf['bias']}</b>  |  {et_emoji}\n"
@@ -2729,13 +2901,14 @@ def send_signal(sig, sess):
         f"{'─'*34}\n"
         f"⚡ <b>Confluences</b>\n{setup_str}\n"
         f"{'─'*34}\n"
-        f"  Entrée : <b>{price:.5g}</b>  |  SL : <b>{sl:.5g}</b>\n"
+        f"  Entrée : <b>{entry_with_spread:.5g}</b>  |  SL : <b>{sl:.5g}</b>\n"
         f"  TP1 : <b>{tp1:.5g}</b> → +<b>${round(risk_usd*1,2)}</b>\n"
         f"  TP2 : <b>{tp2:.5g}</b> → +<b>${round(risk_usd*2,2)}</b>\n"
         f"  TP3 : <b>{tp3:.5g}</b> → +<b>${round(risk_usd*3,2)}</b> 🎯\n"
         f"  ❌ SL : -<b>${risk_usd}</b>\n"
         f"{'─'*34}\n"
         f"💰 ${BALANCE:.0f}  |  Risque {RISK_PCT*100:.0f}% = <b>${risk_usd}</b>  |  Lot <b>{lot}</b>\n"
+        f"💸 Spread : {spread_val} | Frais totaux : <b>${fees_usd}</b> | Net : <b>${round(risk_usd - fees_usd, 2)}</b>\n"
         f"{'═'*34}\n"
         f"⚡ <i>MT5 manuel  |  #ICT #SMC #AlphaBot</i>"
     )
@@ -2807,8 +2980,8 @@ def main():
     global _last_report_day
 
     log("═══════════════════════════════════════════════════════════")
-    log("  AlphaBot SIGNAL v6.29                                     ")
-    log("  Volatilité Priority + Multi-User Broadcast               ")
+    log("  AlphaBot SIGNAL v8.0 — SCALPER ELITE                      ")
+    log("  6 Symboles Ultra-Volatils | M1 LTF | Spread+Frais intégrés")
     log("═══════════════════════════════════════════════════════════")
 
     # ── Chargement des users ──────────────────────────────
@@ -2832,11 +3005,14 @@ def main():
         log("⚠️  TG_TOKEN / TG_CHAT_ID non configurés → MODE CONSOLE (signaux affichés ici uniquement)", "WARN")
     else:
         tg(
-            f"🤖 <b>AlphaBot SIGNAL v6.29 — Démarré</b>\n"
+            f"🤖 <b>AlphaBot SIGNAL v8.0 SCALPER ELITE — Démarré</b>\n"
             f"{'─'*32}\n"
-            f"📊 {len(SYMBOLS)} marchés | SMC/ICT Elite\n"
-            f"🔥 Priorité Volatilité activée 🆕\n"
-            f"👥 Broadcast multi-users 🆕 | /start pour s'abonner\n"
+            f"📊 {len(SYMBOLS)} marchés ultra-volatils | Score /10 | Min 7/10\n"
+            f"⚡ Scan 10s | Cooldown 10min 🆕\n"
+            f"💸 Spread + Commission intégrés 🆕\n"
+            f"🔍 LTF M1 (ultra-précis) 🆕\n"
+            f"🔥 Priorité Volatilité activée\n"
+            f"👥 Broadcast multi-users | /start pour s'abonner\n"
             f"🏦 Order Blocks ICT + Mitigation tracking\n"
             f"📐 BOS / CHoCH structure avancée\n"
             f"📰 News : {'ForexFactory live 🟢' if FF_NEWS_ENABLED else 'horaires fixes ⚠️'}\n"
@@ -2958,7 +3134,7 @@ if __name__ == "__main__":
     # (obligatoire pour Render.com — doit écouter sur PORT)
     keep_alive()
 
-    parser = argparse.ArgumentParser(description="AlphaBot Signal v6.21")
+    parser = argparse.ArgumentParser(description="AlphaBot Signal v8.0")
     parser.add_argument(
         "--backtest", nargs="+", metavar=("SYMBOL", "DAYS"),
         help="Lance le backtest. Ex: --backtest XAUUSD 90  ou  --backtest ALL 30",
@@ -2984,8 +3160,8 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             log("Bot arrêté manuellement.")
             send_daily_report()
-            tg("⛔ AlphaBot Signal v6.0 arrêté.")
+            tg("⛔ AlphaBot Signal v8.0 arrêté.")
         except Exception as e:
             log(f"ERREUR CRITIQUE: {e}", "ERROR")
             log(traceback.format_exc(), "ERROR")
-            tg(f"🚨 <b>AlphaBot Signal v6.21 crash</b>\n<code>{str(e)[:400]}</code>")
+            tg(f"🚨 <b>AlphaBot Signal v8.0 crash</b>\n<code>{str(e)[:400]}</code>")
