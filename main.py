@@ -7,7 +7,7 @@
 ║  ⚡ Scan LIVE 3s | Bougie M5 fermée | Score ≥75               ║
 ║  📸 Graphiques annotés | 🤖 Commandes interactives            ║
 ║  ✅ Validation Leader avant publication (boutons inline)       ║
-║  🔧 v11.2 : LEADER_CHAT_ID fix + qualité signal améliorée    ║
+║  🌐 v11.2-render : Flask health server pour Render.com        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 CHANGEMENTS v11.2 vs v11.1 :
@@ -36,9 +36,16 @@ INSTALL :
   pip install matplotlib
 """
 
-import time, json, logging, ssl, hashlib, hmac
+import time, json, logging, ssl, hashlib, hmac, os
 import urllib.request, urllib.parse, io, threading
 from datetime import datetime, timezone
+
+# ── Flask (health server pour Render.com) ──────────────────────────
+try:
+    from flask import Flask, jsonify
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
 
 try:
     import matplotlib
@@ -1430,6 +1437,48 @@ def process_symbol(market):
         break
 
 # ══════════════════════════════════════════════════════════════════
+#  FLASK HEALTH SERVER — Render.com exige un port ouvert
+# ══════════════════════════════════════════════════════════════════
+def run_health_server():
+    """
+    Mini serveur Flask sur le port Render (env PORT ou 10000).
+    Expose / et /health pour les health checks de Render.
+    Tourne dans un thread daemon séparé — n'impacte pas le bot.
+    """
+    if not FLASK_AVAILABLE:
+        log.warning("Flask absent — health server désactivé → pip install flask")
+        return
+
+    app = Flask("AlphaBot-Health")
+
+    @app.route("/")
+    def index():
+        return jsonify({
+            "status": "running",
+            "bot": "AlphaBot Signal v11.2",
+            "author": "leaderOdg",
+            "signals_total": stats.get("total", 0),
+            "signals_published": stats.get("published", 0),
+            "pending": len(pending_validation),
+            "active": len(active_signals),
+            "mode": "LIVE" if LIVE_TRADING else "Paper",
+        })
+
+    @app.route("/health")
+    def health():
+        return jsonify({"ok": True}), 200
+
+    @app.route("/stats")
+    def api_stats():
+        return jsonify(stats)
+
+    port = int(os.environ.get("PORT", 10000))
+    log.info(f"🌐 Health server Flask démarré sur port {port}")
+    # use_reloader=False obligatoire (déjà dans un thread)
+    app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
 def main():
@@ -1458,9 +1507,10 @@ def main():
         chat_id=LEADER_CHAT_ID   # démarrage visible uniquement par le leader
     )
 
-    threading.Thread(target=poll_loop,     daemon=True, name="TgPoll").start()
-    threading.Thread(target=timeout_check, daemon=True, name="Timeout").start()
-    log.info("🧵 Threads démarrés : polling + timeout")
+    threading.Thread(target=poll_loop,        daemon=True, name="TgPoll").start()
+    threading.Thread(target=timeout_check,    daemon=True, name="Timeout").start()
+    threading.Thread(target=run_health_server, daemon=True, name="Flask").start()
+    log.info("🧵 Threads démarrés : polling + timeout + health server")
 
     while True:
         try:
