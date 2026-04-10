@@ -1,13 +1,13 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         AlphaBot Signal v11.2 — by leaderOdg                   ║
+║         AlphaBot Signal v11.3 — by leaderOdg                   ║
 ║  ⚡ Scan LIVE 3s | Bougie M5 fermée | Score ≥75               ║
 ║  📸 Graphiques annotés | 🤖 Commandes interactives            ║
 ║  ✅ Validation Leader avant publication (boutons inline)       ║
-║  🌐 v11.2-render : Flask health server pour Render.com        ║
+║  🌐 v11.3-render : Flask health server pour Render.com        ║
+║  🔧 [FIX] 1 seul message /analyse | Anti-doublon cmds        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 CHANGEMENTS v11.2 vs v11.1 :
@@ -110,6 +110,8 @@ last_update_id     = 0
 pending_validation = {}   # {sig_id → payload}
 active_signals     = {}   # {sig_id → payload}
 stats = {"total": 0, "published": 0, "rejected": 0, "tp": 0, "sl": 0, "rr_sum": 0.0}
+# [FIX v11.3] Anti-spam commandes : évite les doubles envois (même chat, même cmd)
+_cmd_last_time     = {}   # {(chat_id, cmd) → timestamp}
 
 # ══════════════════════════════════════════════════════════════════
 #  FETCH BINANCE
@@ -1051,6 +1053,13 @@ def handle_command(text, chat_id):
     cmd   = parts[0].lower().split("@")[0]
     args  = parts[1:]
 
+    # [FIX v11.3] Anti-doublon : ignore si même commande déjà traitée il y a < 8s
+    _key = (chat_id, cmd)
+    if time.time() - _cmd_last_time.get(_key, 0) < 8:
+        log.info(f"[CMD] Doublon ignoré : {cmd} from {chat_id}")
+        return
+    _cmd_last_time[_key] = time.time()
+
     # ── /aide ─────────────────────────────────────────────────────
     if cmd in ("/aide", "/start", "/help"):
         send_telegram(
@@ -1205,7 +1214,7 @@ def handle_command(text, chat_id):
         symbol = (args[0].upper() if args else "BTCUSDT")
         if not symbol.endswith("USDT"): symbol += "USDT"
         label  = SYMBOL_MAP.get(symbol, {}).get("label", symbol)
-        send_telegram(f"🔍 Analyse <b>{label}</b> en cours…", chat_id=chat_id)
+        # [FIX v11.3] PAS de message "en cours" — un seul message final
         candles = fetch_candles_m5(symbol, limit=CANDLE_LIMIT)
         if not candles or len(candles) < 40:
             send_telegram(f"❌ Données insuffisantes pour {symbol}.", chat_id=chat_id)
@@ -1483,8 +1492,9 @@ def run_health_server():
 # ══════════════════════════════════════════════════════════════════
 def main():
     log.info("╔══════════════════════════════════════════════════╗")
-    log.info("║  AlphaBot Signal v11.2 — VALIDATION LEADER      ║")
+    log.info("║  AlphaBot Signal v11.3 — VALIDATION LEADER      ║")
     log.info("║  📸 Chart | EMA20/50 | ✅ Boutons | 🔄 Monitor  ║")
+    log.info("║  🔧 [FIX] 1 msg /analyse | Anti-doublon cmds   ║")
     log.info("╚══════════════════════════════════════════════════╝")
 
     if not CHART_AVAILABLE:
@@ -1492,10 +1502,11 @@ def main():
 
     wk = is_weekend()
     send_telegram(
-        f"🤖 <b>AlphaBot v11.2 DÉMARRÉ</b>\n"
+        f"🤖 <b>AlphaBot v11.3 DÉMARRÉ</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ Scan M5 | Score ≥{MIN_SCORE_LIVE} | Min 3 confirmations\n"
         f"✅ Mode : <b>VALIDATION LEADER</b> (privé → groupe)\n"
+        f"🔧 [FIX] /analyse = 1 seul message | Anti-doublon cmds\n"
         f"📸 Graphiques : {'✅ (EMA20/50 inclus)' if CHART_AVAILABLE else '❌ (pip install matplotlib)'}\n"
         f"⏳ Timeout validation : {VALIDATION_TIMEOUT//60} min\n"
         f"🗓 {'🌙 Week-end → BTC Only' if wk else '📊 Semaine → Tous marchés'}\n"
@@ -1503,8 +1514,8 @@ def main():
         f"🔧 Cooldown : {SIGNAL_COOLDOWN//60} min/symbole\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Commandes : /aide | /analyse | /stats | /pending\n"
-        f"🤖 <i>leaderOdg — AlphaBot v11.2</i>",
-        chat_id=LEADER_CHAT_ID   # démarrage visible uniquement par le leader
+        f"🤖 <i>leaderOdg — AlphaBot v11.3</i>",
+        chat_id=LEADER_CHAT_ID
     )
 
     threading.Thread(target=poll_loop,        daemon=True, name="TgPoll").start()
@@ -1527,3 +1538,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
