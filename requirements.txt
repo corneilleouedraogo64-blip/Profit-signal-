@@ -1,4 +1,8 @@
-requests
+anthropic
+google-generativeai
+psycopg2-binary
+flask
+requestsrequests
 flask
 pandas
 numpy
