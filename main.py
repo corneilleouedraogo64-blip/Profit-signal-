@@ -1,4 +1,5 @@
 
+
 #!/usr/bin/env python3
 """
 AlphaBot PRO v19 — Agent IA Adaptatif + Validateur Dual-AI
@@ -106,7 +107,7 @@ PAIR_MAX_LEV = {"BTCUSDT":125,"ETHUSDT":100,"SOLUSDT":50,"BNBUSDT":75,"XRPUSDT":
 
 # Clé API Claude (var d'env prioritaire)
 CLAUDE_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "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")
-CLAUDE_MODEL     = "claude-sonnet-4-20250514"
+CLAUDE_MODEL     = "claude-sonnet-4-5-20250514"
 CLAUDE_TOKENS    = 600
 
 # Clé API Gemini (var d'env prioritaire)
@@ -894,22 +895,41 @@ def sess_bonus(sn):
 # ══════════════════════════════════════════════════════
 #  FETCH DONNÉES YAHOO
 # ══════════════════════════════════════════════════════
+
+# ── Âge max ADAPTATIF par timeframe (en minutes) ─────────────────
+# Un candle 1h est valide jusqu'à 3h après sa clôture (marchés fermés)
+# Un candle 4h est valide jusqu'à 10h après sa clôture
+_DATA_MAX_AGE_MAP = {
+    "1m":  10,    # scalp : fraîcheur absolue
+    "5m":  20,
+    "15m": 45,
+    "30m": 90,
+    "1h":  180,   # 3h  — structure HTF reste valide hors session
+    "2h":  360,
+    "4h":  600,   # 10h — tendance de fond très stable
+    "1d": 1440,
+}
+
 def fetch_c(sym, interval, period):
-    sym_e=urllib.parse.quote(sym)
-    for base in ["https://query1.finance.yahoo.com","https://query2.finance.yahoo.com"]:
+    sym_e   = urllib.parse.quote(sym)
+    max_age = _DATA_MAX_AGE_MAP.get(interval, DATA_MAX_AGE)
+    for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
         try:
-            url="{}/v8/finance/chart/{}?interval={}&range={}&includePrePost=false".format(base,sym_e,interval,period)
-            body=json.loads(http_get(url,timeout=20))
-            res=body.get("chart",{}).get("result",[])
+            url  = "{}/v8/finance/chart/{}?interval={}&range={}&includePrePost=false".format(
+                       base, sym_e, interval, period)
+            body = json.loads(http_get(url, timeout=20))
+            res  = body.get("chart", {}).get("result", [])
             if not res: continue
-            ts=res[0].get("timestamp",[])
-            if ts and (time.time()-ts[-1])/60>DATA_MAX_AGE:
-                log("WARN",clr("{} {} trop vieux — ignoré".format(sym,interval),"y")); return None
-            q=res[0]["indicators"]["quote"][0]
-            c=[{"o":float(o),"h":float(h),"l":float(l),"c":float(cv)}
-               for o,h,l,cv in zip(q.get("open",[]),q.get("high",[]),q.get("low",[]),q.get("close",[]))
-               if None not in (o,h,l,cv)]
-            if len(c)>=10: return c
+            ts   = res[0].get("timestamp", [])
+            if ts and (time.time() - ts[-1]) / 60 > max_age:
+                log("WARN", clr("{} {} trop vieux — ignoré".format(sym, interval), "y"))
+                return None
+            q = res[0]["indicators"]["quote"][0]
+            c = [{"o": float(o), "h": float(h), "l": float(l), "c": float(cv)}
+                 for o, h, l, cv in zip(q.get("open",  []), q.get("high", []),
+                                        q.get("low",   []), q.get("close",[]))
+                 if None not in (o, h, l, cv)]
+            if len(c) >= 10: return c
         except: continue
     return None
 
