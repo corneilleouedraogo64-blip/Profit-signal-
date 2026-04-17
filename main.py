@@ -1,7 +1,8 @@
 
 #!/usr/bin/env python3
 """
-AlphaBot PRO v17 — Agent IA Adaptatif
+AlphaBot PRO v19 — Agent IA Adaptatif + Validateur Dual-AI
+════════════════════════════════════════════════════════════
 • Bot Telegram FREE/PRO/VIP + paiement USDT auto
 • 20 marchés Forex/Métaux/Crypto/Indices/Pétrole
 • Cerveau ICT/SMC v2 + Analyse Multi-Timeframe
@@ -9,7 +10,16 @@ AlphaBot PRO v17 — Agent IA Adaptatif
 • Si pas de setup parfait → l'agent allège les critères
   si tendance de fond + session + broker sont valides
 • Challenge IA 5$→500$ (Binance simulation)
-• pip install requests
+• ✨ NEW v19 : Validateur Dual-AI (Claude + Gemini)
+    – Algo ICT/SMC  → Analyste technique (score /100)
+    – Claude / Gemini / Les deux → Risk Manager (score /10 + proba %)
+    – Script        → Juge final (score hybride ≥ 75/100)
+    – Modes : auto | claude | gemini | both
+      · auto   = Claude en priorité, Gemini en fallback si Claude échoue
+      · claude  = Claude uniquement
+      · gemini  = Gemini uniquement
+      · both    = les deux, moyenne des scores (vote majoritaire)
+• pip install requests anthropic google-generativeai
 """
 import json, ssl, time, threading, math, random, logging
 import urllib.request, urllib.parse, urllib.error, os
@@ -17,6 +27,22 @@ from datetime import datetime, timedelta, timezone
 from queue import Queue, Empty
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import defaultdict, deque
+
+# ── Anthropic SDK (Claude AI Validator) ─────────────────────────────
+try:
+    import anthropic as _anthropic_sdk
+    _ANTHROPIC_OK = True
+except ImportError:
+    _ANTHROPIC_OK = False
+    print("[ClaudeAI] ⚠️  pip install anthropic requis pour la validation IA")
+
+# ── Google Gemini SDK (Validateur alternatif) ────────────────────────
+try:
+    import google.generativeai as _genai_sdk
+    _GEMINI_OK = True
+except ImportError:
+    _GEMINI_OK = False
+    print("[GeminiAI] ⚠️  pip install google-generativeai pour le fallback Gemini")
 
 # ══════════════════════════════════════════════════════
 #  CONFIG
@@ -73,6 +99,357 @@ MARKETS = [
 ]
 CAT_EMO = {"FOREX":"💱","METALS":"🥇","CRYPTO":"₿","INDICES":"📈","OIL":"🛢"}
 PAIR_MAX_LEV = {"BTCUSDT":125,"ETHUSDT":100,"SOLUSDT":50,"BNBUSDT":75,"XRPUSDT":50}
+# ══════════════════════════════════════════════════════════════════════
+#  MODULE CLAUDE AI — VALIDATEUR EXPERT ICT/SMC
+#  Architecture : Algo (analyste) → Claude (risk mgr) → Script (juge)
+# ══════════════════════════════════════════════════════════════════════
+
+# Clé API Claude (var d'env prioritaire)
+CLAUDE_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "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")
+CLAUDE_MODEL     = "claude-sonnet-4-20250514"
+CLAUDE_TOKENS    = 600
+
+# Clé API Gemini (var d'env prioritaire)
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6I8j_xOFnPsXkwFn_gbOa6oidS0E7l8cYWZqLPWmItkNA")
+GEMINI_MODEL     = "gemini-1.5-flash"   # rapide + économique
+
+# Sélection du moteur IA :
+#   auto   = Claude d'abord, Gemini en fallback si Claude échoue/absent
+#   claude = Claude uniquement
+#   gemini = Gemini uniquement
+#   both   = les deux → moyenne des scores (vote majoritaire)
+AI_VALIDATOR     = os.getenv("AI_VALIDATOR", "auto")
+
+# Seuils de décision hybride
+AI_SCORE_MIN     = 7.0    # Score Claude /10
+AI_PROBA_MIN     = 55.0   # Probabilité Claude %
+FINAL_HYBRID_MIN = 75.0   # Score hybride final /100
+AI_WEIGHT        = 0.40   # Poids IA dans hybride
+ALGO_WEIGHT      = 0.60   # Poids algo dans hybride
+
+# Cache anti-double appel (5 min)
+_ai_cache     = {}
+_ai_cache_ttl = 300
+_ai_lock      = threading.Lock()
+_LAI          = logging.getLogger("ClaudeAI")
+
+
+def _claude_session_risk(session: str) -> str:
+    """Détecte conflits session autour des ouvertures/clôtures."""
+    h = datetime.now(timezone.utc).hour
+    m = datetime.now(timezone.utc).minute
+    warns = []
+    if h == 11 and m >= 30:
+        warns.append("⚠️ Clôture London dans {}min".format(90 - m))
+    if h == 13 and m >= 20:
+        warns.append("⚠️ Ouverture NY dans {}min".format(90 - m))
+    if h == 14 and m <= 30:
+        warns.append("⚠️ Ouverture NY en cours — volatilité extrême")
+    if h == 15 and m >= 45:
+        warns.append("⚠️ Fixing London dans {}min".format(75 - m))
+    if h == 16 and m <= 15:
+        warns.append("⚠️ Fixing London — reversal institutionnel possible")
+    if h == 21 and m >= 30:
+        warns.append("⚠️ Clôture NY dans {}min".format(90 - m))
+    if h == 22:
+        warns.append("⚠️ Zone rollover — spread élargi")
+    if datetime.now(timezone.utc).weekday() == 0 and h < 7:
+        warns.append("⚠️ Lundi matin — liquidité faible")
+    return "\n".join(warns) if warns else "✅ Timing propre — aucun conflit"
+
+
+def _claude_build_prompt(sig: dict, session: str, htf_trend: str) -> str:
+    """Construit le prompt ICT envoyé à Claude."""
+    side_fr  = "ACHAT (LONG)" if sig.get("side") == "BUY" else "VENTE (SHORT)"
+    now_utc  = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    entry, sl_v, tp = sig.get("entry","?"), sig.get("sl","?"), sig.get("tp","?")
+    try:
+        dist_sl = "{:.3f}%".format(abs(float(entry)-float(sl_v))/float(entry)*100)
+        dist_tp = "{:.3f}%".format(abs(float(tp)-float(entry))/float(entry)*100)
+    except Exception:
+        dist_sl = dist_tp = "?"
+    return """Tu es un trader ICT/SMC institutionnel expert avec 10 ans d'expérience.
+
+Ton rôle : analyser CE SETUP précis et donner un verdict VALIDER ou REJETER.
+
+━━━ SETUP DÉTECTÉ ━━━
+🕐 Heure        : {heure}
+📊 Actif        : {pair}
+📈 Direction    : {side}
+🌍 Session      : {session}
+📉 Tendance HTF : {htf}
+⏱️ Timeframe    : {tf}
+⚡ Mode         : {mode}
+
+━━━ NIVEAUX CLÉS ━━━
+📍 Entrée : {entry}
+🛑 Stop   : {sl}  ({dist_sl} de distance)
+🎯 TP     : {tp}  ({dist_tp} de distance)
+📐 RR     : 1:{rr}
+📏 ATR    : {atr}
+
+━━━ CONFIRMATIONS ALGO ━━━
+Score algo : {score}/100
+Badges ICT : {badges}
+
+━━━ RISQUE SESSION ━━━
+{session_risk}
+
+━━━ TA MISSION ━━━
+Analyse selon 6 critères (sois STRICT) :
+1. DIRECTION : aligné HTF + session ?
+2. TIMING : TP atteignable en <4h ? Risque clôture session ?
+3. BOUGIE : confirmation propre ? Displacement fort ?
+4. LIQUIDITÉ : sweep authentique ou fake ?
+5. SESSION : risque rollover/fixing/open ?
+6. FONDAMENTAUX : setup contre news imminente ?
+
+━━━ FORMAT OBLIGATOIRE ━━━
+Réponds UNIQUEMENT avec ce JSON exact, sans texte avant ni après :
+
+{{
+  "score": <0-10>,
+  "probabilite": <0-100>,
+  "verdict": "VALIDER" ou "REJETER",
+  "raison": "<2-3 phrases max, français, très concis>",
+  "risque_principal": "<risque #1 en une phrase>",
+  "timing_ok": true ou false
+}}""".format(
+        heure=now_utc, pair=sig.get("name","?"), side=side_fr,
+        session=session, htf=htf_trend, tf=sig.get("tf_tag","M5"),
+        mode=sig.get("mode","NORMAL"), entry=entry, sl=sl_v,
+        dist_sl=dist_sl, tp=tp, dist_tp=dist_tp, rr=sig.get("rr","?"),
+        atr=sig.get("atr","?"), score=sig.get("score","?"),
+        badges=sig.get("badges","Aucun badge"),
+        session_risk=_claude_session_risk(session))
+
+
+def _claude_call(prompt: str) -> dict | None:
+    """Appelle l'API Claude et retourne le JSON parsé."""
+    if not _ANTHROPIC_OK or not CLAUDE_API_KEY:
+        return None
+    try:
+        client = _anthropic_sdk.Anthropic(api_key=CLAUDE_API_KEY)
+        resp   = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=CLAUDE_TOKENS,
+            messages=[{"role": "user", "content": prompt}])
+        raw = resp.content[0].text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        return json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        _LAI.error("Claude JSON parse: {}".format(e))
+        return None
+    except Exception as e:
+        _LAI.error("Claude API: {}".format(e))
+        return None
+
+
+def _gemini_call(prompt: str) -> dict | None:
+    """Appelle l'API Gemini et retourne le JSON parsé (même format que _claude_call)."""
+    if not _GEMINI_OK or not GEMINI_API_KEY:
+        return None
+    try:
+        _genai_sdk.configure(api_key=GEMINI_API_KEY)
+        model  = _genai_sdk.GenerativeModel(GEMINI_MODEL)
+        resp   = model.generate_content(prompt)
+        raw    = resp.text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        return json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        _LAI.error("Gemini JSON parse: {}".format(e))
+        return None
+    except Exception as e:
+        _LAI.error("Gemini API: {}".format(e))
+        return None
+
+
+def _ai_call_with_fallback(prompt: str) -> tuple[dict | None, str]:
+    """
+    Dispatcher intelligent selon AI_VALIDATOR.
+    Retourne (parsed_dict, source) où source ∈ {"claude","gemini","both","none"}.
+
+    Modes :
+      auto   → Claude d'abord ; si échec → Gemini
+      claude → Claude uniquement
+      gemini → Gemini uniquement
+      both   → Les deux ; moyenne score + probabilité (vote majoritaire sur verdict)
+    """
+    mode = AI_VALIDATOR.lower()
+
+    if mode == "claude":
+        r = _claude_call(prompt)
+        return (r, "claude") if r else (None, "none")
+
+    if mode == "gemini":
+        r = _gemini_call(prompt)
+        return (r, "gemini") if r else (None, "none")
+
+    if mode == "both":
+        rc = _claude_call(prompt)
+        rg = _gemini_call(prompt)
+        if rc and rg:
+            # Moyenne des deux scores
+            merged = {
+                "score"           : round((float(rc.get("score",0)) + float(rg.get("score",0))) / 2, 1),
+                "probabilite"     : round((float(rc.get("probabilite",0)) + float(rg.get("probabilite",0))) / 2, 1),
+                # verdict majoritaire : VALIDER seulement si les deux valident
+                "verdict"         : "VALIDER" if (rc.get("verdict","").upper() == "VALIDER"
+                                                   and rg.get("verdict","").upper() == "VALIDER") else "REJETER",
+                "raison"          : rc.get("raison","?"),           # Claude prioritaire pour la raison
+                "risque_principal": rc.get("risque_principal") or rg.get("risque_principal","?"),
+                "timing_ok"       : rc.get("timing_ok", False) and rg.get("timing_ok", False),
+            }
+            return (merged, "both")
+        elif rc:
+            return (rc, "claude")
+        elif rg:
+            return (rg, "gemini")
+        return (None, "none")
+
+    # mode == "auto" (défaut) : Claude → Gemini fallback
+    rc = _claude_call(prompt)
+    if rc:
+        return (rc, "claude")
+    _LAI.info("Claude indisponible → fallback Gemini")
+    rg = _gemini_call(prompt)
+    return (rg, "gemini") if rg else (None, "none")
+
+
+def claude_validate_signal(sig: dict, session: str, htf_trend: str) -> dict:
+    """
+    Valide un signal via Claude AI (Risk Manager).
+
+    Returns dict :
+      validated   bool   – True = envoyer
+      ai_score    float  – /10
+      ai_proba    float  – %
+      verdict     str    – VALIDER / REJETER
+      raison      str
+      risque      str
+      final_score float  – score hybride /100
+      timing_ok   bool
+      cached      bool
+    """
+    fail = {"validated": False, "ai_score": 0, "ai_proba": 0,
+            "verdict": "ERREUR", "raison": "Appel IA échoué",
+            "risque": "Inconnu", "final_score": 0,
+            "timing_ok": False, "cached": False}
+
+    # Vérifier qu'au moins une IA est disponible selon le mode
+    mode = AI_VALIDATOR.lower()
+    claude_ready = _ANTHROPIC_OK and bool(CLAUDE_API_KEY)
+    gemini_ready = _GEMINI_OK and bool(GEMINI_API_KEY)
+    if mode == "claude" and not claude_ready:
+        _LAI.warning("Mode claude mais SDK/clé Claude absent — validation ignorée")
+        return fail
+    if mode == "gemini" and not gemini_ready:
+        _LAI.warning("Mode gemini mais SDK/clé Gemini absent — validation ignorée")
+        return fail
+    if mode in ("auto", "both") and not claude_ready and not gemini_ready:
+        _LAI.warning("Aucune IA disponible (claude+gemini) — validation ignorée")
+        return fail
+
+    cache_key = "{}-{}-{}-{}".format(
+        sig.get("name"), sig.get("side"), sig.get("entry"), session)
+    with _ai_lock:
+        cached = _ai_cache.get(cache_key)
+        if cached and time.time() - cached["ts"] < _ai_cache_ttl:
+            r = dict(cached["result"]); r["cached"] = True
+            _LAI.info("Cache hit: {}".format(cache_key))
+            return r
+
+    t0 = time.time()
+    parsed, ai_source = _ai_call_with_fallback(_claude_build_prompt(sig, session, htf_trend))
+    elapsed = round(time.time() - t0, 2)
+
+    if not parsed:
+        _LAI.warning("Aucune IA n'a répondu — signal rejeté")
+        return fail
+
+    ai_score  = float(parsed.get("score", 0))
+    ai_proba  = float(parsed.get("probabilite", 0))
+    verdict   = parsed.get("verdict", "REJETER").upper()
+    raison    = parsed.get("raison", "?")
+    risque    = parsed.get("risque_principal", "?")
+    timing_ok = bool(parsed.get("timing_ok", False))
+
+    # Score hybride : algo 60% + IA 40%
+    algo_sc    = float(sig.get("score", 0))
+    ai_sc_n    = (ai_score / 10.0) * 100
+    final_sc   = round(algo_sc * ALGO_WEIGHT + ai_sc_n * AI_WEIGHT, 1)
+
+    validated = (verdict == "VALIDER"
+                 and ai_score  >= AI_SCORE_MIN
+                 and ai_proba  >= AI_PROBA_MIN
+                 and final_sc  >= FINAL_HYBRID_MIN
+                 and timing_ok)
+
+    result = {
+        "validated"  : validated,
+        "ai_score"   : round(ai_score, 1),
+        "ai_proba"   : round(ai_proba, 1),
+        "verdict"    : verdict,
+        "raison"     : raison,
+        "risque"     : risque,
+        "final_score": final_sc,
+        "timing_ok"  : timing_ok,
+        "elapsed_s"  : elapsed,
+        "ai_source"  : ai_source,   # "claude" | "gemini" | "both" | "none"
+        "cached"     : False,
+    }
+    icon = "✅" if validated else "❌"
+    _LAI.info("{} {} | {} | Score {}/10 | Proba {}% | Hybride {}/100 | {}s".format(
+        icon, sig.get("name","?"), ai_source.upper(),
+        ai_score, ai_proba, final_sc, elapsed))
+
+    with _ai_lock:
+        _ai_cache[cache_key] = {"result": result, "ts": time.time()}
+    return result
+
+
+def fmt_ai_block(ai: dict) -> str:
+    """Bloc HTML IA à coller en fin du message signal PRO."""
+    if not ai or ai.get("verdict") in ("ERREUR", None, ""):
+        return ""
+    verdict   = ai.get("verdict", "?")
+    ai_score  = ai.get("ai_score", 0)
+    ai_proba  = ai.get("ai_proba", 0)
+    raison    = ai.get("raison", "")
+    risque    = ai.get("risque", "")
+    final_sc  = ai.get("final_score", 0)
+    timing    = "✅" if ai.get("timing_ok") else "⚠️"
+    v_icon    = "✅" if verdict == "VALIDER" else "❌"
+    bar       = "█" * int(ai_score) + "░" * (10 - int(ai_score))
+
+    # Label dynamique selon la source IA utilisée
+    source = ai.get("ai_source", "claude").lower()
+    if source == "gemini":
+        ai_label = "GEMINI"
+    elif source == "both":
+        ai_label = "CLAUDE + GEMINI"
+    else:
+        ai_label = "CLAUDE"
+
+    return (
+        "\n━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 <b>ANALYSE IA — {}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "{} <b>{}</b>\n\n"
+        "📊 Score IA    : <b>{}/10</b>  [{}]\n"
+        "📈 Probabilité : <b>{}%</b>\n"
+        "⭐ Score final : <b>{}/100</b>\n"
+        "⏱️ Timing      : {}\n\n"
+        "💡 <i>{}</i>\n\n"
+        "⚠️ Risque : <i>{}</i>\n"
+        "━━━━━━━━━━━━━━━━━━━"
+    ).format(ai_label, v_icon, verdict, ai_score, bar,
+             ai_proba, final_sc, timing, raison, risque)
+
+
 # ══════════════════════════════════════════════════════
 #  STRATÉGIE MULTI-MARCHÉS : FILTRE JOUR + PRIORITÉ
 # ══════════════════════════════════════════════════════
@@ -3199,6 +3576,30 @@ def _scan_and_send_inner():
         sigs_raw = [(s, k) for s, k in sigs_raw if k not in _sent]
     sigs_raw.sort(key=lambda x: -x[0]["score"])
 
+    # ── ✨ Validation Claude AI (Risk Manager) ────────────────────────
+    # Pipeline : Algo (analyste) → Claude (validateur) → Script (juge)
+    if CLAUDE_API_KEY:
+        sigs_validated_ai = []
+        for sig, key in sigs_raw:
+            if sig.get("rr", 0) >= 2.0 and sig.get("score", 0) >= sm:
+                htf_trend = sig.get("bias", "BULLISH")
+                ai_result = claude_validate_signal(sig, sn, htf_trend)
+                sig["ai_result"] = ai_result
+                if ai_result["validated"]:
+                    sigs_validated_ai.append((sig, key))
+                else:
+                    log("AI", "❌ {} rejeté Claude — {} (hybride {}/100)".format(
+                        sig["name"],
+                        ai_result["raison"][:60] if ai_result.get("raison") else "?",
+                        ai_result.get("final_score", 0)))
+            else:
+                sig["ai_result"] = {}
+                sigs_validated_ai.append((sig, key))
+        log("AI", "Filtre Claude : {}/{} setups validés".format(
+            len(sigs_validated_ai), len(sigs_raw)))
+        sigs_raw = sigs_validated_ai
+    # ─────────────────────────────────────────────────────────────────
+
     pro_users  = db_get_pro_users()
     free_users = db_get_free_users()
     pro_users_eff  = [u for u in pro_users if not (u == ADMIN_ID and _admin_test_mode == "FREE")]
@@ -4078,7 +4479,7 @@ def fmt_signal_pro(s, news, sl):
         score=s["score"], score_min=s.get("score_min", "?"), bar=bar, atr=s["atr"],
         news_s="\u2705 Pas de news" if news_ok else "\u26a0\ufe0f News actif",
         sp_s="\u2705 Spread OK" if sp_ok else "\u26a0\ufe0f Spread large",
-        badges_s=s.get("badges", "") or "\u2014")
+        badges_s=s.get("badges", "") or "\u2014") + fmt_ai_block(s.get("ai_result", {}))
 
 
 def get_ote_zone(swing_high, swing_low, bias):
@@ -6625,16 +7026,21 @@ def main():
             sm_real = get_adaptive_score_min()
             ch = chal_get()
             tg_send(ADMIN_ID,
-                "🤖 <b>AlphaBot PRO v10 — EN LIGNE !</b>\n\n"
+                "🤖 <b>AlphaBot PRO v18 — EN LIGNE !</b>\n\n"
                 "✅ DB initialisée\n"
                 "✅ Port {} ouvert\n"
-                "✅ Webhook configuré\n\n"
+                "✅ Webhook configuré\n"
+                "🧠 IA Validator : {}  [mode: {}]\n\n"
                 "🕐 Session : <b>{}</b>  Score min : <b>{}</b>\n"
                 "🌍 Régime IA : <b>{}</b>\n"
                 "🏆 Challenge : <b>{:.4f}$</b>\n\n"
                 "📡 FREE {}/j  ·  PRO {}/j\n"
                 "🛠 /admin pour le panel".format(
-                    port, sl_l, sm_real,
+                    port,
+                    ("✅ Claude" if CLAUDE_API_KEY else "⚠️ Sans Claude")
+                    + (" + Gemini" if GEMINI_API_KEY else ""),
+                    AI_VALIDATOR,
+                    sl_l, sm_real,
                     AI_REG.get("regime", "Init"),
                     ch["balance"], FREE_LIMIT, PRO_LIMIT),
                 kb=kb_reply())
